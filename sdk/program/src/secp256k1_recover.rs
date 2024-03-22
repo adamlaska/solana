@@ -78,6 +78,7 @@ pub const SECP256K1_PUBLIC_KEY_LENGTH: usize = 64;
     Hash,
     AbiExample,
 )]
+#[borsh(crate = "borsh")]
 pub struct Secp256k1Pubkey(pub [u8; SECP256K1_PUBLIC_KEY_LENGTH]);
 
 impl Secp256k1Pubkey {
@@ -108,7 +109,7 @@ impl Secp256k1Pubkey {
 /// arbitrary message, signed by some public key.
 ///
 /// The recovery ID is a value in the range [0, 3] that is generated during
-/// signing, and allows the recovery process to be more efficent. Note that the
+/// signing, and allows the recovery process to be more efficient. Note that the
 /// `recovery_id` here does not directly correspond to an Ethereum recovery ID
 /// as used in `ecrecover`. This function accepts recovery IDs in the range of
 /// [0, 3], while Ethereum's recovery IDs have a value of 27 or 28. To convert
@@ -192,7 +193,7 @@ impl Secp256k1Pubkey {
 ///
 /// This has the downside that the program must link to the [`libsecp256k1`]
 /// crate and parse the signature just for this check. Note that `libsecp256k1`
-/// version 0.7.0 or greater is required for running on the Solana BPF target.
+/// version 0.7.0 or greater is required for running on the Solana SBF target.
 ///
 /// [`libsecp256k1`]: https://docs.rs/libsecp256k1/latest/libsecp256k1
 ///
@@ -210,14 +211,14 @@ impl Secp256k1Pubkey {
 ///
 /// If `hash` is not 32 bytes in length this function returns
 /// [`Secp256k1RecoverError::InvalidHash`], though see notes
-/// on BPF-specific behavior below.
+/// on SBF-specific behavior below.
 ///
 /// If `recovery_id` is not in the range [0, 3] this function returns
 /// [`Secp256k1RecoverError::InvalidRecoveryId`].
 ///
 /// If `signature` is not 64 bytes in length this function returns
 /// [`Secp256k1RecoverError::InvalidSignature`], though see notes
-/// on BPF-specific behavior below.
+/// on SBF-specific behavior below.
 ///
 /// If `signature` represents an "overflowing" signature this function returns
 /// [`Secp256k1RecoverError::InvalidSignature`]. Overflowing signatures are
@@ -226,7 +227,7 @@ impl Secp256k1Pubkey {
 /// If `signature` is otherwise invalid this function returns
 /// [`Secp256k1RecoverError::InvalidSignature`].
 ///
-/// # BPF-specific behavior
+/// # SBF-specific behavior
 ///
 /// When calling this function on-chain the caller must verify the correct
 /// lengths of `hash` and `signature` beforehand.
@@ -254,6 +255,7 @@ impl Secp256k1Pubkey {
 /// use borsh::{BorshDeserialize, BorshSerialize};
 ///
 /// #[derive(BorshSerialize, BorshDeserialize, Debug)]
+/// # #[borsh(crate = "borsh")]
 /// pub struct DemoSecp256k1RecoverInstruction {
 ///     pub message: Vec<u8>,
 ///     pub signature: [u8; 64],
@@ -335,10 +337,10 @@ impl Secp256k1Pubkey {
 /// The RPC client program:
 ///
 /// ```no_run
-/// # use solana_program::example_mocks::solana_client;
+/// # use solana_program::example_mocks::solana_rpc_client;
 /// # use solana_program::example_mocks::solana_sdk;
 /// use anyhow::Result;
-/// use solana_client::rpc_client::RpcClient;
+/// use solana_rpc_client::rpc_client::RpcClient;
 /// use solana_sdk::{
 ///     instruction::Instruction,
 ///     keccak,
@@ -348,6 +350,7 @@ impl Secp256k1Pubkey {
 /// };
 /// # use borsh::{BorshDeserialize, BorshSerialize};
 /// # #[derive(BorshSerialize, BorshDeserialize, Debug)]
+/// # #[borsh(crate = "borsh")]
 /// # pub struct DemoSecp256k1RecoverInstruction {
 /// #     pub message: Vec<u8>,
 /// #     pub signature: [u8; 64],

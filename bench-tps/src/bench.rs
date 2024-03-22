@@ -1,28 +1,32 @@
 use {
     crate::{
         bench_tps_client::*,
-        cli::Config,
+        cli::{ComputeUnitPrice, Config, InstructionPaddingConfig},
         perf_utils::{sample_txs, SampleStats},
         send_batch::*,
     },
     log::*,
+    rand::distributions::{Distribution, Uniform},
     rayon::prelude::*,
-    solana_client::nonce_utils,
+    solana_client::{nonce_utils, rpc_request::MAX_MULTIPLE_ACCOUNTS},
     solana_metrics::{self, datapoint_info},
     solana_sdk::{
+        account::Account,
         clock::{DEFAULT_MS_PER_SLOT, DEFAULT_S_PER_SLOT, MAX_PROCESSING_AGE},
+        compute_budget::ComputeBudgetInstruction,
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         message::Message,
         native_token::Sol,
         pubkey::Pubkey,
         signature::{Keypair, Signer},
-        system_transaction,
+        system_instruction,
         timing::{duration_as_ms, duration_as_s, duration_as_us, timestamp},
         transaction::Transaction,
     },
+    spl_instruction_padding::instruction::wrap_instruction,
     std::{
-        collections::VecDeque,
+        collections::{HashSet, VecDeque},
         process::exit,
         sync::{
             atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering},
@@ -36,6 +40,53 @@ use {
 // The point at which transactions become "too old", in seconds.
 const MAX_TX_QUEUE_AGE: u64 = (MAX_PROCESSING_AGE as f64 * DEFAULT_S_PER_SLOT) as u64;
 
+// Add prioritization fee to transfer transactions, if `compute_unit_price` is set.
+// If `Random` the compute-unit-price is determined by generating a random number in the range
+// 0..MAX_RANDOM_COMPUTE_UNIT_PRICE then multiplying by COMPUTE_UNIT_PRICE_MULTIPLIER.
+// If `Fixed` the compute-unit-price is the value of the `compute-unit-price` parameter.
+// It also sets transaction's compute-unit to TRANSFER_TRANSACTION_COMPUTE_UNIT. Therefore the
+// max additional cost is:
+// `TRANSFER_TRANSACTION_COMPUTE_UNIT * MAX_COMPUTE_UNIT_PRICE * COMPUTE_UNIT_PRICE_MULTIPLIER / 1_000_000`
+const MAX_RANDOM_COMPUTE_UNIT_PRICE: u64 = 50;
+const COMPUTE_UNIT_PRICE_MULTIPLIER: u64 = 1_000;
+const TRANSFER_TRANSACTION_COMPUTE_UNIT: u32 = 600; // 1 transfer is plus 3 compute_budget ixs
+const PADDED_TRANSFER_COMPUTE_UNIT: u32 = 3_000; // padding program execution requires consumes this amount
+
+/// calculate maximum possible prioritization fee, if `use-randomized-compute-unit-price` is
+/// enabled, round to nearest lamports.
+pub fn max_lamports_for_prioritization(compute_unit_price: &Option<ComputeUnitPrice>) -> u64 {
+    let Some(compute_unit_price) = compute_unit_price else {
+        return 0;
+    };
+
+    let compute_unit_price = match compute_unit_price {
+        ComputeUnitPrice::Random => (MAX_RANDOM_COMPUTE_UNIT_PRICE as u128)
+            .saturating_mul(COMPUTE_UNIT_PRICE_MULTIPLIER as u128),
+        ComputeUnitPrice::Fixed(compute_unit_price) => *compute_unit_price as u128,
+    };
+
+    const MICRO_LAMPORTS_PER_LAMPORT: u64 = 1_000_000;
+    let micro_lamport_fee: u128 =
+        compute_unit_price.saturating_mul(TRANSFER_TRANSACTION_COMPUTE_UNIT as u128);
+    let fee = micro_lamport_fee
+        .saturating_add(MICRO_LAMPORTS_PER_LAMPORT.saturating_sub(1) as u128)
+        .saturating_div(MICRO_LAMPORTS_PER_LAMPORT as u128);
+    u64::try_from(fee).unwrap_or(u64::MAX)
+}
+
+// In case of plain transfer transaction, set loaded account data size to 30K.
+// It is large enough yet smaller than 32K page size, so it'd cost 0 extra CU.
+const TRANSFER_TRANSACTION_LOADED_ACCOUNTS_DATA_SIZE: u32 = 30 * 1024;
+// In case of padding program usage, we need to take into account program size
+const PADDING_PROGRAM_ACCOUNT_DATA_SIZE: u32 = 28 * 1024;
+fn get_transaction_loaded_accounts_data_size(enable_padding: bool) -> u32 {
+    if enable_padding {
+        TRANSFER_TRANSACTION_LOADED_ACCOUNTS_DATA_SIZE + PADDING_PROGRAM_ACCOUNT_DATA_SIZE
+    } else {
+        TRANSFER_TRANSACTION_LOADED_ACCOUNTS_DATA_SIZE
+    }
+}
+
 pub type TimestampedTransaction = (Transaction, Option<u64>);
 pub type SharedTransactions = Arc<RwLock<VecDeque<Vec<TimestampedTransaction>>>>;
 
@@ -47,13 +98,31 @@ struct KeypairChunks<'a> {
 }
 
 impl<'a> KeypairChunks<'a> {
-    /// Split input vector of keypairs into two sets of chunks of given size
+    /// Split input slice of keypairs into two sets of chunks of given size
     fn new(keypairs: &'a [Keypair], chunk_size: usize) -> Self {
+        // Use `chunk_size` as the number of conflict groups per chunk so that each destination key is unique
+        Self::new_with_conflict_groups(keypairs, chunk_size, chunk_size)
+    }
+
+    /// Split input slice of keypairs into two sets of chunks of given size. Each chunk
+    /// has a set of source keys and a set of destination keys. There will be
+    /// `num_conflict_groups_per_chunk` unique destination keys per chunk, so that the
+    /// destination keys may conflict with each other.
+    fn new_with_conflict_groups(
+        keypairs: &'a [Keypair],
+        chunk_size: usize,
+        num_conflict_groups_per_chunk: usize,
+    ) -> Self {
         let mut source_keypair_chunks: Vec<Vec<&Keypair>> = Vec::new();
         let mut dest_keypair_chunks: Vec<VecDeque<&Keypair>> = Vec::new();
         for chunk in keypairs.chunks_exact(2 * chunk_size) {
             source_keypair_chunks.push(chunk[..chunk_size].iter().collect());
-            dest_keypair_chunks.push(chunk[chunk_size..].iter().collect());
+            dest_keypair_chunks.push(
+                std::iter::repeat(&chunk[chunk_size..chunk_size + num_conflict_groups_per_chunk])
+                    .flatten()
+                    .take(chunk_size)
+                    .collect(),
+            );
         }
         KeypairChunks {
             source: source_keypair_chunks,
@@ -68,6 +137,9 @@ struct TransactionChunkGenerator<'a, 'b, T: ?Sized> {
     nonce_chunks: Option<KeypairChunks<'b>>,
     chunk_index: usize,
     reclaim_lamports_back_to_source_account: bool,
+    compute_unit_price: Option<ComputeUnitPrice>,
+    instruction_padding_config: Option<InstructionPaddingConfig>,
+    skip_tx_account_data_size: bool,
 }
 
 impl<'a, 'b, T> TransactionChunkGenerator<'a, 'b, T>
@@ -79,8 +151,16 @@ where
         gen_keypairs: &'a [Keypair],
         nonce_keypairs: Option<&'b Vec<Keypair>>,
         chunk_size: usize,
+        compute_unit_price: Option<ComputeUnitPrice>,
+        instruction_padding_config: Option<InstructionPaddingConfig>,
+        num_conflict_groups: Option<usize>,
+        skip_tx_account_data_size: bool,
     ) -> Self {
-        let account_chunks = KeypairChunks::new(gen_keypairs, chunk_size);
+        let account_chunks = if let Some(num_conflict_groups) = num_conflict_groups {
+            KeypairChunks::new_with_conflict_groups(gen_keypairs, chunk_size, num_conflict_groups)
+        } else {
+            KeypairChunks::new(gen_keypairs, chunk_size)
+        };
         let nonce_chunks =
             nonce_keypairs.map(|nonce_keypairs| KeypairChunks::new(nonce_keypairs, chunk_size));
 
@@ -90,6 +170,9 @@ where
             nonce_chunks,
             chunk_index: 0,
             reclaim_lamports_back_to_source_account: false,
+            compute_unit_price,
+            instruction_padding_config,
+            skip_tx_account_data_size,
         }
     }
 
@@ -115,6 +198,8 @@ where
                 source_nonce_chunk,
                 dest_nonce_chunk,
                 self.reclaim_lamports_back_to_source_account,
+                self.skip_tx_account_data_size,
+                &self.instruction_padding_config,
             )
         } else {
             assert!(blockhash.is_some());
@@ -123,6 +208,9 @@ where
                 dest_chunk,
                 self.reclaim_lamports_back_to_source_account,
                 blockhash.unwrap(),
+                &self.instruction_padding_config,
+                &self.compute_unit_price,
+                self.skip_tx_account_data_size,
             )
         };
 
@@ -155,7 +243,7 @@ where
         // Move on to next chunk
         self.chunk_index = (self.chunk_index + 1) % self.account_chunks.source.len();
 
-        // Switch directions after transfering for each "chunk"
+        // Switch directions after transferring for each "chunk"
         if self.chunk_index == 0 {
             self.reclaim_lamports_back_to_source_account =
                 !self.reclaim_lamports_back_to_source_account;
@@ -190,7 +278,7 @@ where
 
 fn create_sampler_thread<T>(
     client: &Arc<T>,
-    exit_signal: &Arc<AtomicBool>,
+    exit_signal: Arc<AtomicBool>,
     sample_period: u64,
     maxes: &Arc<RwLock<Vec<(String, SampleStats)>>>,
 ) -> JoinHandle<()>
@@ -198,13 +286,12 @@ where
     T: 'static + BenchTpsClient + Send + Sync + ?Sized,
 {
     info!("Sampling TPS every {} second...", sample_period);
-    let exit_signal = exit_signal.clone();
     let maxes = maxes.clone();
     let client = client.clone();
     Builder::new()
         .name("solana-client-sample".to_string())
         .spawn(move || {
-            sample_txs(&exit_signal, &maxes, sample_period, &client);
+            sample_txs(exit_signal, &maxes, sample_period, &client);
         })
         .unwrap()
 }
@@ -217,13 +304,20 @@ fn generate_chunked_transfers<T: 'static + BenchTpsClient + Send + Sync + ?Sized
     threads: usize,
     duration: Duration,
     sustained: bool,
+    use_durable_nonce: bool,
 ) {
     // generate and send transactions for the specified duration
     let start = Instant::now();
     let mut last_generate_txs_time = Instant::now();
 
     while start.elapsed() < duration {
-        generate_txs(shared_txs, &recent_blockhash, &mut chunk_generator, threads);
+        generate_txs(
+            shared_txs,
+            &recent_blockhash,
+            &mut chunk_generator,
+            threads,
+            use_durable_nonce,
+        );
 
         datapoint_info!(
             "blockhash_stats",
@@ -260,7 +354,7 @@ fn create_sender_threads<T>(
     thread_batch_sleep_ms: usize,
     total_tx_sent_count: &Arc<AtomicUsize>,
     threads: usize,
-    exit_signal: &Arc<AtomicBool>,
+    exit_signal: Arc<AtomicBool>,
     shared_tx_active_thread_count: &Arc<AtomicIsize>,
 ) -> Vec<JoinHandle<()>>
 where
@@ -290,7 +384,12 @@ where
         .collect()
 }
 
-pub fn do_bench_tps<T>(client: Arc<T>, config: Config, gen_keypairs: Vec<Keypair>) -> u64
+pub fn do_bench_tps<T>(
+    client: Arc<T>,
+    config: Config,
+    gen_keypairs: Vec<Keypair>,
+    nonce_keypairs: Option<Vec<Keypair>>,
+) -> u64
 where
     T: 'static + BenchTpsClient + Send + Sync + ?Sized,
 {
@@ -302,6 +401,11 @@ where
         tx_count,
         sustained,
         target_slots_per_epoch,
+        compute_unit_price,
+        skip_tx_account_data_size,
+        use_durable_nonce,
+        instruction_padding_config,
+        num_conflict_groups,
         ..
     } = config;
 
@@ -309,8 +413,12 @@ where
     let chunk_generator = TransactionChunkGenerator::new(
         client.clone(),
         &gen_keypairs,
-        None, // TODO(klykov): to be added in the follow up PR
+        nonce_keypairs.as_ref(),
         tx_count,
+        compute_unit_price,
+        instruction_padding_config,
+        num_conflict_groups,
+        skip_tx_account_data_size,
     );
 
     let first_tx_count = loop {
@@ -330,7 +438,7 @@ where
     // collect the max transaction rate and total tx count seen
     let maxes = Arc::new(RwLock::new(Vec::new()));
     let sample_period = 1; // in seconds
-    let sample_thread = create_sampler_thread(&client, &exit_signal, sample_period, &maxes);
+    let sample_thread = create_sampler_thread(&client, exit_signal.clone(), sample_period, &maxes);
 
     let shared_txs: SharedTransactions = Arc::new(RwLock::new(VecDeque::new()));
 
@@ -338,17 +446,22 @@ where
     let shared_tx_active_thread_count = Arc::new(AtomicIsize::new(0));
     let total_tx_sent_count = Arc::new(AtomicUsize::new(0));
 
-    let blockhash_thread = {
+    // if we use durable nonce, we don't need blockhash thread
+    let blockhash_thread = if !use_durable_nonce {
         let exit_signal = exit_signal.clone();
         let blockhash = blockhash.clone();
         let client = client.clone();
         let id = id.pubkey();
-        Builder::new()
-            .name("solana-blockhash-poller".to_string())
-            .spawn(move || {
-                poll_blockhash(&exit_signal, &blockhash, &client, &id);
-            })
-            .unwrap()
+        Some(
+            Builder::new()
+                .name("solana-blockhash-poller".to_string())
+                .spawn(move || {
+                    poll_blockhash(&exit_signal, &blockhash, &client, &id);
+                })
+                .unwrap(),
+        )
+    } else {
+        None
     };
 
     let s_threads = create_sender_threads(
@@ -357,7 +470,7 @@ where
         thread_batch_sleep_ms,
         &total_tx_sent_count,
         threads,
-        &exit_signal,
+        exit_signal.clone(),
         &shared_tx_active_thread_count,
     );
 
@@ -373,6 +486,7 @@ where
         threads,
         duration,
         sustained,
+        use_durable_nonce,
     );
 
     // Stop the sampling threads so it will collect the stats
@@ -391,9 +505,15 @@ where
         }
     }
 
-    info!("Waiting for blockhash thread...");
-    if let Err(err) = blockhash_thread.join() {
-        info!("  join() failed with: {:?}", err);
+    if let Some(blockhash_thread) = blockhash_thread {
+        info!("Waiting for blockhash thread...");
+        if let Err(err) = blockhash_thread.join() {
+            info!("  join() failed with: {:?}", err);
+        }
+    }
+
+    if let Some(nonce_keypairs) = nonce_keypairs {
+        withdraw_durable_nonce_accounts(client.clone(), &gen_keypairs, &nonce_keypairs);
     }
 
     let balance = client.get_balance(&id.pubkey()).unwrap_or(0);
@@ -423,6 +543,9 @@ fn generate_system_txs(
     dest: &VecDeque<&Keypair>,
     reclaim: bool,
     blockhash: &Hash,
+    instruction_padding_config: &Option<InstructionPaddingConfig>,
+    compute_unit_price: &Option<ComputeUnitPrice>,
+    skip_tx_account_data_size: bool,
 ) -> Vec<TimestampedTransaction> {
     let pairs: Vec<_> = if !reclaim {
         source.iter().zip(dest.iter()).collect()
@@ -430,27 +553,210 @@ fn generate_system_txs(
         dest.iter().zip(source.iter()).collect()
     };
 
-    pairs
-        .par_iter()
-        .map(|(from, to)| {
-            (
-                system_transaction::transfer(from, &to.pubkey(), 1, *blockhash),
-                Some(timestamp()),
-            )
-        })
-        .collect()
+    if let Some(compute_unit_price) = compute_unit_price {
+        let compute_unit_prices = match compute_unit_price {
+            ComputeUnitPrice::Random => {
+                let mut rng = rand::thread_rng();
+                let range = Uniform::from(0..MAX_RANDOM_COMPUTE_UNIT_PRICE);
+                (0..pairs.len())
+                    .map(|_| {
+                        range
+                            .sample(&mut rng)
+                            .saturating_mul(COMPUTE_UNIT_PRICE_MULTIPLIER)
+                    })
+                    .collect()
+            }
+            ComputeUnitPrice::Fixed(compute_unit_price) => vec![*compute_unit_price; pairs.len()],
+        };
+
+        let pairs_with_compute_unit_prices: Vec<_> =
+            pairs.iter().zip(compute_unit_prices.iter()).collect();
+
+        pairs_with_compute_unit_prices
+            .par_iter()
+            .map(|((from, to), compute_unit_price)| {
+                (
+                    transfer_with_compute_unit_price_and_padding(
+                        from,
+                        &to.pubkey(),
+                        1,
+                        *blockhash,
+                        instruction_padding_config,
+                        Some(**compute_unit_price),
+                        skip_tx_account_data_size,
+                    ),
+                    Some(timestamp()),
+                )
+            })
+            .collect()
+    } else {
+        pairs
+            .par_iter()
+            .map(|(from, to)| {
+                (
+                    transfer_with_compute_unit_price_and_padding(
+                        from,
+                        &to.pubkey(),
+                        1,
+                        *blockhash,
+                        instruction_padding_config,
+                        None,
+                        skip_tx_account_data_size,
+                    ),
+                    Some(timestamp()),
+                )
+            })
+            .collect()
+    }
 }
 
-fn get_nonce_blockhash<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
-    client: Arc<T>,
-    nonce_account_pubkey: Pubkey,
-) -> Hash {
-    let nonce_account = client
-        .get_account(&nonce_account_pubkey)
-        .unwrap_or_else(|error| panic!("{:?}", error));
-    let nonce_data = nonce_utils::data_from_account(&nonce_account)
-        .unwrap_or_else(|error| panic!("{:?}", error));
-    nonce_data.blockhash()
+fn transfer_with_compute_unit_price_and_padding(
+    from_keypair: &Keypair,
+    to: &Pubkey,
+    lamports: u64,
+    recent_blockhash: Hash,
+    instruction_padding_config: &Option<InstructionPaddingConfig>,
+    compute_unit_price: Option<u64>,
+    skip_tx_account_data_size: bool,
+) -> Transaction {
+    let from_pubkey = from_keypair.pubkey();
+    let transfer_instruction = system_instruction::transfer(&from_pubkey, to, lamports);
+    let instruction = if let Some(instruction_padding_config) = instruction_padding_config {
+        wrap_instruction(
+            instruction_padding_config.program_id,
+            transfer_instruction,
+            vec![],
+            instruction_padding_config.data_size,
+        )
+        .expect("Could not create padded instruction")
+    } else {
+        transfer_instruction
+    };
+    let mut instructions = vec![];
+    if !skip_tx_account_data_size {
+        instructions.push(
+            ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(
+                get_transaction_loaded_accounts_data_size(instruction_padding_config.is_some()),
+            ),
+        )
+    }
+    instructions.push(instruction);
+    if instruction_padding_config.is_some() {
+        // By default, CU budget is DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT which is much larger than needed
+        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(
+            PADDED_TRANSFER_COMPUTE_UNIT,
+        ));
+    }
+
+    if let Some(compute_unit_price) = compute_unit_price {
+        instructions.extend_from_slice(&[
+            ComputeBudgetInstruction::set_compute_unit_limit(TRANSFER_TRANSACTION_COMPUTE_UNIT),
+            ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
+        ])
+    }
+    let message = Message::new(&instructions, Some(&from_pubkey));
+    Transaction::new(&[from_keypair], message, recent_blockhash)
+}
+
+fn get_nonce_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    client: &Arc<T>,
+    nonce_pubkeys: &[Pubkey],
+) -> Vec<Option<Account>> {
+    // get_multiple_accounts supports maximum MAX_MULTIPLE_ACCOUNTS pubkeys in request
+    assert!(nonce_pubkeys.len() <= MAX_MULTIPLE_ACCOUNTS);
+    loop {
+        match client.get_multiple_accounts(nonce_pubkeys) {
+            Ok(nonce_accounts) => {
+                return nonce_accounts;
+            }
+            Err(err) => {
+                info!("Couldn't get durable nonce account: {:?}", err);
+                sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn get_nonce_blockhashes<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    client: &Arc<T>,
+    nonce_pubkeys: &[Pubkey],
+) -> Vec<Hash> {
+    let num_accounts = nonce_pubkeys.len();
+    let mut blockhashes = vec![Hash::default(); num_accounts];
+    let mut unprocessed = (0..num_accounts).collect::<HashSet<_>>();
+
+    let mut request_pubkeys = Vec::<Pubkey>::with_capacity(num_accounts);
+    let mut request_indexes = Vec::<usize>::with_capacity(num_accounts);
+
+    while !unprocessed.is_empty() {
+        for i in &unprocessed {
+            request_pubkeys.push(nonce_pubkeys[*i]);
+            request_indexes.push(*i);
+        }
+
+        let num_unprocessed_before = unprocessed.len();
+        let accounts: Vec<Option<Account>> = nonce_pubkeys
+            .chunks(MAX_MULTIPLE_ACCOUNTS)
+            .flat_map(|pubkeys| get_nonce_accounts(client, pubkeys))
+            .collect();
+
+        for (account, index) in accounts.iter().zip(request_indexes.iter()) {
+            if let Some(nonce_account) = account {
+                let nonce_data = nonce_utils::data_from_account(nonce_account).unwrap();
+                blockhashes[*index] = nonce_data.blockhash();
+                unprocessed.remove(index);
+            }
+        }
+        let num_unprocessed_after = unprocessed.len();
+        debug!(
+            "Received {} durable nonce accounts",
+            num_unprocessed_before - num_unprocessed_after
+        );
+        request_pubkeys.clear();
+        request_indexes.clear();
+    }
+    blockhashes
+}
+
+fn nonced_transfer_with_padding(
+    from_keypair: &Keypair,
+    to: &Pubkey,
+    lamports: u64,
+    nonce_account: &Pubkey,
+    nonce_authority: &Keypair,
+    nonce_hash: Hash,
+    skip_tx_account_data_size: bool,
+    instruction_padding_config: &Option<InstructionPaddingConfig>,
+) -> Transaction {
+    let from_pubkey = from_keypair.pubkey();
+    let transfer_instruction = system_instruction::transfer(&from_pubkey, to, lamports);
+    let instruction = if let Some(instruction_padding_config) = instruction_padding_config {
+        wrap_instruction(
+            instruction_padding_config.program_id,
+            transfer_instruction,
+            vec![],
+            instruction_padding_config.data_size,
+        )
+        .expect("Could not create padded instruction")
+    } else {
+        transfer_instruction
+    };
+    let mut instructions = vec![];
+    if !skip_tx_account_data_size {
+        instructions.push(
+            ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(
+                get_transaction_loaded_accounts_data_size(instruction_padding_config.is_some()),
+            ),
+        )
+    }
+    instructions.push(instruction);
+    let message = Message::new_with_nonce(
+        instructions,
+        Some(&from_pubkey),
+        nonce_account,
+        &nonce_authority.pubkey(),
+    );
+    Transaction::new(&[from_keypair, nonce_authority], message, nonce_hash)
 }
 
 fn generate_nonced_system_txs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
@@ -460,37 +766,52 @@ fn generate_nonced_system_txs<T: 'static + BenchTpsClient + Send + Sync + ?Sized
     source_nonce: &[&Keypair],
     dest_nonce: &VecDeque<&Keypair>,
     reclaim: bool,
+    skip_tx_account_data_size: bool,
+    instruction_padding_config: &Option<InstructionPaddingConfig>,
 ) -> Vec<TimestampedTransaction> {
     let length = source.len();
     let mut transactions: Vec<TimestampedTransaction> = Vec::with_capacity(length);
-    for i in 0..length {
-        let (from, to, nonce, nonce_blockhash) = if !reclaim {
-            (
-                source[i],
-                dest[i],
-                source_nonce[i],
-                get_nonce_blockhash(client.clone(), source_nonce[i].pubkey()),
-            )
-        } else {
-            (
-                dest[i],
-                source[i],
-                dest_nonce[i],
-                get_nonce_blockhash(client.clone(), dest_nonce[i].pubkey()),
-            )
-        };
+    if !reclaim {
+        let pubkeys: Vec<Pubkey> = source_nonce
+            .iter()
+            .map(|keypair| keypair.pubkey())
+            .collect();
 
-        transactions.push((
-            system_transaction::nonced_transfer(
-                from,
-                &to.pubkey(),
-                1,
-                &nonce.pubkey(),
-                from,
-                nonce_blockhash,
-            ),
-            None,
-        ));
+        let blockhashes: Vec<Hash> = get_nonce_blockhashes(&client, &pubkeys);
+        for i in 0..length {
+            transactions.push((
+                nonced_transfer_with_padding(
+                    source[i],
+                    &dest[i].pubkey(),
+                    1,
+                    &source_nonce[i].pubkey(),
+                    source[i],
+                    blockhashes[i],
+                    skip_tx_account_data_size,
+                    instruction_padding_config,
+                ),
+                None,
+            ));
+        }
+    } else {
+        let pubkeys: Vec<Pubkey> = dest_nonce.iter().map(|keypair| keypair.pubkey()).collect();
+        let blockhashes: Vec<Hash> = get_nonce_blockhashes(&client, &pubkeys);
+
+        for i in 0..length {
+            transactions.push((
+                nonced_transfer_with_padding(
+                    dest[i],
+                    &source[i].pubkey(),
+                    1,
+                    &dest_nonce[i].pubkey(),
+                    dest[i],
+                    blockhashes[i],
+                    skip_tx_account_data_size,
+                    instruction_padding_config,
+                ),
+                None,
+            ));
+        }
     }
     transactions
 }
@@ -500,10 +821,14 @@ fn generate_txs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
     blockhash: &Arc<RwLock<Hash>>,
     chunk_generator: &mut TransactionChunkGenerator<'_, '_, T>,
     threads: usize,
+    use_durable_nonce: bool,
 ) {
-    let blockhash = blockhash.read().map(|x| *x).ok();
-
-    let transactions = chunk_generator.generate(blockhash.as_ref());
+    let transactions = if use_durable_nonce {
+        chunk_generator.generate(None)
+    } else {
+        let blockhash = blockhash.read().map(|x| *x).ok();
+        chunk_generator.generate(blockhash.as_ref())
+    };
 
     let sz = transactions.len() / threads;
     let chunks: Vec<_> = transactions.chunks(sz).collect();
@@ -535,7 +860,7 @@ fn get_new_latest_blockhash<T: BenchTpsClient + ?Sized>(
 }
 
 fn poll_blockhash<T: BenchTpsClient + ?Sized>(
-    exit_signal: &Arc<AtomicBool>,
+    exit_signal: &AtomicBool,
     blockhash: &Arc<RwLock<Hash>>,
     client: &Arc<T>,
     id: &Pubkey,
@@ -585,7 +910,7 @@ fn poll_blockhash<T: BenchTpsClient + ?Sized>(
 }
 
 fn do_tx_transfers<T: BenchTpsClient + ?Sized>(
-    exit_signal: &Arc<AtomicBool>,
+    exit_signal: &AtomicBool,
     shared_txs: &SharedTransactions,
     shared_tx_thread_count: &Arc<AtomicIsize>,
     total_tx_sent_count: &Arc<AtomicUsize>,
@@ -742,13 +1067,23 @@ pub fn generate_and_fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?S
     funding_key: &Keypair,
     keypair_count: usize,
     lamports_per_account: u64,
+    skip_tx_account_data_size: bool,
+    enable_padding: bool,
 ) -> Result<Vec<Keypair>> {
     let rent = client.get_minimum_balance_for_rent_exemption(0)?;
     let lamports_per_account = lamports_per_account + rent;
 
     info!("Creating {} keypairs...", keypair_count);
     let (mut keypairs, extra) = generate_keypairs(funding_key, keypair_count as u64);
-    fund_keypairs(client, funding_key, &keypairs, extra, lamports_per_account)?;
+    fund_keypairs(
+        client,
+        funding_key,
+        &keypairs,
+        extra,
+        lamports_per_account,
+        skip_tx_account_data_size,
+        enable_padding,
+    )?;
 
     // 'generate_keypairs' generates extra keys to be able to have size-aligned funding batches for fund_keys.
     keypairs.truncate(keypair_count);
@@ -762,6 +1097,8 @@ pub fn fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
     keypairs: &[Keypair],
     extra: u64,
     lamports_per_account: u64,
+    skip_tx_account_data_size: bool,
+    enable_padding: bool,
 ) -> Result<()> {
     let rent = client.get_minimum_balance_for_rent_exemption(0)?;
     info!("Get lamports...");
@@ -818,6 +1155,8 @@ pub fn fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
                 return Err(BenchTpsError::AirdropFailure);
             }
         }
+        let data_size_limit = (!skip_tx_account_data_size)
+            .then(|| get_transaction_loaded_accounts_data_size(enable_padding));
 
         fund_keys(
             client,
@@ -826,6 +1165,7 @@ pub fn fund_keypairs<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
             total,
             max_fee,
             lamports_per_account,
+            data_size_limit,
         );
     }
     Ok(())
@@ -837,16 +1177,26 @@ mod tests {
         super::*,
         solana_runtime::{bank::Bank, bank_client::BankClient},
         solana_sdk::{
-            commitment_config::CommitmentConfig, fee_calculator::FeeRateGovernor,
-            genesis_config::create_genesis_config, native_token::sol_to_lamports, nonce::State,
+            commitment_config::CommitmentConfig,
+            feature_set::FeatureSet,
+            fee_calculator::FeeRateGovernor,
+            genesis_config::{create_genesis_config, GenesisConfig},
+            native_token::sol_to_lamports,
+            nonce::State,
         },
     };
+
+    fn bank_with_all_features(genesis_config: &GenesisConfig) -> Arc<Bank> {
+        let mut bank = Bank::new_for_tests(genesis_config);
+        bank.feature_set = Arc::new(FeatureSet::all_enabled());
+        bank.wrap_with_bank_forks_for_tests().0
+    }
 
     #[test]
     fn test_bench_tps_bank_client() {
         let (genesis_config, id) = create_genesis_config(sol_to_lamports(10_000.0));
-        let bank = Bank::new_for_tests(&genesis_config);
-        let client = Arc::new(BankClient::new(bank));
+        let bank = bank_with_all_features(&genesis_config);
+        let client = Arc::new(BankClient::new_shared(bank));
 
         let config = Config {
             id,
@@ -857,22 +1207,24 @@ mod tests {
 
         let keypair_count = config.tx_count * config.keypair_multiplier;
         let keypairs =
-            generate_and_fund_keypairs(client.clone(), &config.id, keypair_count, 20).unwrap();
+            generate_and_fund_keypairs(client.clone(), &config.id, keypair_count, 20, false, false)
+                .unwrap();
 
-        do_bench_tps(client, config, keypairs);
+        do_bench_tps(client, config, keypairs, None);
     }
 
     #[test]
     fn test_bench_tps_fund_keys() {
         let (genesis_config, id) = create_genesis_config(sol_to_lamports(10_000.0));
-        let bank = Bank::new_for_tests(&genesis_config);
-        let client = Arc::new(BankClient::new(bank));
+        let bank = bank_with_all_features(&genesis_config);
+        let client = Arc::new(BankClient::new_shared(bank));
         let keypair_count = 20;
         let lamports = 20;
         let rent = client.get_minimum_balance_for_rent_exemption(0).unwrap();
 
         let keypairs =
-            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports).unwrap();
+            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports, false, false)
+                .unwrap();
 
         for kp in &keypairs {
             assert_eq!(
@@ -889,14 +1241,15 @@ mod tests {
         let (mut genesis_config, id) = create_genesis_config(sol_to_lamports(10_000.0));
         let fee_rate_governor = FeeRateGovernor::new(11, 0);
         genesis_config.fee_rate_governor = fee_rate_governor;
-        let bank = Bank::new_for_tests(&genesis_config);
-        let client = Arc::new(BankClient::new(bank));
+        let bank = bank_with_all_features(&genesis_config);
+        let client = Arc::new(BankClient::new_shared(bank));
         let keypair_count = 20;
         let lamports = 20;
         let rent = client.get_minimum_balance_for_rent_exemption(0).unwrap();
 
         let keypairs =
-            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports).unwrap();
+            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports, false, false)
+                .unwrap();
 
         for kp in &keypairs {
             assert_eq!(client.get_balance(&kp.pubkey()).unwrap(), lamports + rent);
@@ -906,13 +1259,14 @@ mod tests {
     #[test]
     fn test_bench_tps_create_durable_nonce() {
         let (genesis_config, id) = create_genesis_config(sol_to_lamports(10_000.0));
-        let bank = Bank::new_for_tests(&genesis_config);
-        let client = Arc::new(BankClient::new(bank));
+        let bank = bank_with_all_features(&genesis_config);
+        let client = Arc::new(BankClient::new_shared(bank));
         let keypair_count = 10;
         let lamports = 10_000_000;
 
         let authority_keypairs =
-            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports).unwrap();
+            generate_and_fund_keypairs(client.clone(), &id, keypair_count, lamports, false, false)
+                .unwrap();
 
         let nonce_keypairs = generate_durable_nonce_accounts(client.clone(), &authority_keypairs);
 
@@ -928,5 +1282,61 @@ mod tests {
             );
         }
         withdraw_durable_nonce_accounts(client, &authority_keypairs, &nonce_keypairs)
+    }
+
+    #[test]
+    fn test_bench_tps_key_chunks_new() {
+        let num_keypairs = 16;
+        let chunk_size = 4;
+        let keypairs = std::iter::repeat_with(Keypair::new)
+            .take(num_keypairs)
+            .collect::<Vec<_>>();
+
+        let chunks = KeypairChunks::new(&keypairs, chunk_size);
+        assert_eq!(
+            chunks.source[0],
+            &[&keypairs[0], &keypairs[1], &keypairs[2], &keypairs[3]]
+        );
+        assert_eq!(
+            chunks.dest[0],
+            &[&keypairs[4], &keypairs[5], &keypairs[6], &keypairs[7]]
+        );
+        assert_eq!(
+            chunks.source[1],
+            &[&keypairs[8], &keypairs[9], &keypairs[10], &keypairs[11]]
+        );
+        assert_eq!(
+            chunks.dest[1],
+            &[&keypairs[12], &keypairs[13], &keypairs[14], &keypairs[15]]
+        );
+    }
+
+    #[test]
+    fn test_bench_tps_key_chunks_new_with_conflict_groups() {
+        let num_keypairs = 16;
+        let chunk_size = 4;
+        let num_conflict_groups = 2;
+        let keypairs = std::iter::repeat_with(Keypair::new)
+            .take(num_keypairs)
+            .collect::<Vec<_>>();
+
+        let chunks =
+            KeypairChunks::new_with_conflict_groups(&keypairs, chunk_size, num_conflict_groups);
+        assert_eq!(
+            chunks.source[0],
+            &[&keypairs[0], &keypairs[1], &keypairs[2], &keypairs[3]]
+        );
+        assert_eq!(
+            chunks.dest[0],
+            &[&keypairs[4], &keypairs[5], &keypairs[4], &keypairs[5]]
+        );
+        assert_eq!(
+            chunks.source[1],
+            &[&keypairs[8], &keypairs[9], &keypairs[10], &keypairs[11]]
+        );
+        assert_eq!(
+            chunks.dest[1],
+            &[&keypairs[12], &keypairs[13], &keypairs[12], &keypairs[13]]
+        );
     }
 }

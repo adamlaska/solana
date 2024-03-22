@@ -4,10 +4,10 @@ use {
         common::dispatch,
         legacy, merkle,
         traits::{Shred as _, ShredData as ShredDataTrait},
-        DataShredHeader, Error, ShredCommonHeader, ShredFlags, ShredType, ShredVariant,
+        DataShredHeader, Error, ShredCommonHeader, ShredFlags, ShredType, ShredVariant, SignedData,
         MAX_DATA_SHREDS_PER_SLOT,
     },
-    solana_sdk::{clock::Slot, signature::Signature},
+    solana_sdk::{clock::Slot, hash::Hash, signature::Signature},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,13 +28,25 @@ impl ShredData {
     dispatch!(pub(super) fn parent(&self) -> Result<Slot, Error>);
     dispatch!(pub(super) fn payload(&self) -> &Vec<u8>);
     dispatch!(pub(super) fn sanitize(&self) -> Result<(), Error>);
-    dispatch!(pub(super) fn set_last_in_slot(&mut self));
     dispatch!(pub(super) fn set_signature(&mut self, signature: Signature));
-    dispatch!(pub(super) fn signed_message(&self) -> &[u8]);
 
     // Only for tests.
     dispatch!(pub(super) fn set_index(&mut self, index: u32));
     dispatch!(pub(super) fn set_slot(&mut self, slot: Slot));
+
+    pub(super) fn signed_data(&self) -> Result<SignedData, Error> {
+        match self {
+            Self::Legacy(shred) => Ok(SignedData::Chunk(shred.signed_data()?)),
+            Self::Merkle(shred) => Ok(SignedData::MerkleRoot(shred.signed_data()?)),
+        }
+    }
+
+    pub(super) fn merkle_root(&self) -> Result<Hash, Error> {
+        match self {
+            Self::Legacy(_) => Err(Error::InvalidShredType),
+            Self::Merkle(shred) => shred.merkle_root(),
+        }
+    }
 
     pub(super) fn new_from_data(
         slot: Slot,
@@ -85,8 +97,10 @@ impl ShredData {
     // Possibly zero pads bytes stored in blockstore.
     pub(crate) fn resize_stored_shred(shred: Vec<u8>) -> Result<Vec<u8>, Error> {
         match shred::layout::get_shred_variant(&shred)? {
-            ShredVariant::LegacyCode | ShredVariant::MerkleCode(_) => Err(Error::InvalidShredType),
-            ShredVariant::MerkleData(_) => {
+            ShredVariant::LegacyCode | ShredVariant::MerkleCode { .. } => {
+                Err(Error::InvalidShredType)
+            }
+            ShredVariant::MerkleData { .. } => {
                 if shred.len() != merkle::ShredData::SIZE_OF_PAYLOAD {
                     return Err(Error::InvalidPayloadSize(shred.len()));
                 }
@@ -97,12 +111,29 @@ impl ShredData {
     }
 
     // Maximum size of ledger data that can be embedded in a data-shred.
-    // merkle_proof_size is the number of proof entries in the merkle tree
-    // branch. None indicates a legacy data-shred.
-    pub(crate) fn capacity(merkle_proof_size: Option<u8>) -> Result<usize, Error> {
-        match merkle_proof_size {
+    // merkle_proof_size is the number of merkle proof entries.
+    // None indicates a legacy data-shred.
+    pub fn capacity(
+        merkle_variant: Option<(
+            u8,   // proof_size
+            bool, // chained
+            bool, // resigned
+        )>,
+    ) -> Result<usize, Error> {
+        match merkle_variant {
             None => Ok(legacy::ShredData::CAPACITY),
-            Some(proof_size) => merkle::ShredData::capacity(proof_size),
+            Some((proof_size, chained, resigned)) => {
+                debug_assert!(chained || !resigned);
+                merkle::ShredData::capacity(proof_size, chained, resigned)
+            }
+        }
+    }
+
+    // Only for tests.
+    pub(super) fn set_last_in_slot(&mut self) {
+        match self {
+            Self::Legacy(shred) => shred.set_last_in_slot(),
+            Self::Merkle(_) => panic!("Not Implemented!"),
         }
     }
 }

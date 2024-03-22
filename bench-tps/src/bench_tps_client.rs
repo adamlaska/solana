@@ -1,10 +1,12 @@
 use {
-    solana_client::{client_error::ClientError, tpu_client::TpuSenderError},
+    solana_rpc_client_api::{client_error::Error as ClientError, config::RpcBlockConfig},
     solana_sdk::{
         account::Account, commitment_config::CommitmentConfig, epoch_info::EpochInfo, hash::Hash,
-        message::Message, pubkey::Pubkey, signature::Signature, transaction::Transaction,
-        transport::TransportError,
+        message::Message, pubkey::Pubkey, signature::Signature, slot_history::Slot,
+        transaction::Transaction, transport::TransportError,
     },
+    solana_tpu_client::tpu_client::TpuSenderError,
+    solana_transaction_status::UiConfirmedBlock,
     thiserror::Error,
 };
 
@@ -83,9 +85,32 @@ pub trait BenchTpsClient {
 
     /// Returns all information associated with the account of the provided pubkey
     fn get_account(&self, pubkey: &Pubkey) -> Result<Account>;
+
+    /// Returns all information associated with the account of the provided pubkey, using explicit commitment
+    fn get_account_with_commitment(
+        &self,
+        pubkey: &Pubkey,
+        commitment_config: CommitmentConfig,
+    ) -> Result<Account>;
+
+    fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Account>>>;
+
+    fn get_slot_with_commitment(&self, commitment_config: CommitmentConfig) -> Result<Slot>;
+
+    fn get_blocks_with_commitment(
+        &self,
+        start_slot: Slot,
+        end_slot: Option<Slot>,
+        commitment_config: CommitmentConfig,
+    ) -> Result<Vec<Slot>>;
+
+    fn get_block_with_config(
+        &self,
+        slot: Slot,
+        rpc_block_config: RpcBlockConfig,
+    ) -> Result<UiConfirmedBlock>;
 }
 
 mod bank_client;
 mod rpc_client;
-mod thin_client;
 mod tpu_client;

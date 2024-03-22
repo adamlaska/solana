@@ -1,6 +1,6 @@
 //! Compact serde-encoding of vectors with small length.
 
-#![allow(clippy::integer_arithmetic)]
+#![allow(clippy::arithmetic_side_effects)]
 use {
     serde::{
         de::{self, Deserializer, SeqAccess, Visitor},
@@ -63,9 +63,7 @@ impl VisitError {
         A: SeqAccess<'de>,
     {
         match self {
-            VisitError::TooLong(len) => {
-                de::Error::invalid_length(len as usize, &"three or fewer bytes")
-            }
+            VisitError::TooLong(len) => de::Error::invalid_length(len, &"three or fewer bytes"),
             VisitError::TooShort(len) => de::Error::invalid_length(len, &"more bytes"),
             VisitError::Overflow(val) => de::Error::invalid_value(
                 de::Unexpected::Unsigned(val as u64),

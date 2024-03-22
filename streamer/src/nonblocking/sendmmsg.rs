@@ -54,12 +54,13 @@ mod tests {
     use {
         crate::{
             nonblocking::{
-                recvmmsg::recv_mmsg,
+                recvmmsg::{recv_mmsg, recv_mmsg_exact},
                 sendmmsg::{batch_send, multi_target_send},
             },
             packet::Packet,
             sendmmsg::SendPktsError,
         },
+        assert_matches::assert_matches,
         solana_sdk::packet::PACKET_DATA_SIZE,
         std::{
             io::ErrorKind,
@@ -81,7 +82,7 @@ mod tests {
         assert_eq!(sent, Some(()));
 
         let mut packets = vec![Packet::default(); 32];
-        let recv = recv_mmsg(&reader, &mut packets[..]).await.unwrap();
+        let recv = recv_mmsg_exact(&reader, &mut packets[..]).await.unwrap();
         assert_eq!(32, recv);
     }
 
@@ -111,12 +112,12 @@ mod tests {
         let sent = batch_send(&sender, &packet_refs[..]).await.ok();
         assert_eq!(sent, Some(()));
 
-        let mut packets = vec![Packet::default(); 32];
-        let recv = recv_mmsg(&reader, &mut packets[..]).await.unwrap();
+        let mut packets = vec![Packet::default(); 16];
+        let recv = recv_mmsg_exact(&reader, &mut packets[..]).await.unwrap();
         assert_eq!(16, recv);
 
-        let mut packets = vec![Packet::default(); 32];
-        let recv = recv_mmsg(&reader2, &mut packets[..]).await.unwrap();
+        let mut packets = vec![Packet::default(); 16];
+        let recv = recv_mmsg_exact(&reader2, &mut packets[..]).await.unwrap();
         assert_eq!(16, recv);
     }
 
@@ -177,16 +178,10 @@ mod tests {
         let dest_refs: Vec<_> = vec![&ip4, &ip6, &ip4];
 
         let sender = UdpSocket::bind("0.0.0.0:0").await.expect("bind");
-        if let Err(SendPktsError::IoError(_, num_failed)) =
-            batch_send(&sender, &packet_refs[..]).await
-        {
-            assert_eq!(num_failed, 1);
-        }
-        if let Err(SendPktsError::IoError(_, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs).await
-        {
-            assert_eq!(num_failed, 1);
-        }
+        let res = batch_send(&sender, &packet_refs[..]).await;
+        assert_matches!(res, Err(SendPktsError::IoError(_, /*num_failed*/ 1)));
+        let res = multi_target_send(&sender, &packets[0], &dest_refs).await;
+        assert_matches!(res, Err(SendPktsError::IoError(_, /*num_failed*/ 1)));
     }
 
     #[tokio::test]
@@ -204,11 +199,12 @@ mod tests {
             (&packets[3][..], &ipv4broadcast),
             (&packets[4][..], &ipv4local),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..]).await
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match batch_send(&sender, &packet_refs[..]).await {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test leading and trailing failures for batch_send
@@ -219,11 +215,12 @@ mod tests {
             (&packets[3][..], &ipv4local),
             (&packets[4][..], &ipv4broadcast),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..]).await
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 3);
+        match batch_send(&sender, &packet_refs[..]).await {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 3);
+            }
         }
 
         // test consecutive intermediate failures for batch_send
@@ -234,11 +231,12 @@ mod tests {
             (&packets[3][..], &ipv4broadcast),
             (&packets[4][..], &ipv4local),
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            batch_send(&sender, &packet_refs[..]).await
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match batch_send(&sender, &packet_refs[..]).await {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test intermediate failures for multi_target_send
@@ -249,11 +247,12 @@ mod tests {
             &ipv4broadcast,
             &ipv4local,
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs).await
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 2);
+        match multi_target_send(&sender, &packets[0], &dest_refs).await {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 2);
+            }
         }
 
         // test leading and trailing failures for multi_target_send
@@ -264,11 +263,12 @@ mod tests {
             &ipv4local,
             &ipv4broadcast,
         ];
-        if let Err(SendPktsError::IoError(ioerror, num_failed)) =
-            multi_target_send(&sender, &packets[0], &dest_refs).await
-        {
-            assert!(matches!(ioerror.kind(), ErrorKind::PermissionDenied));
-            assert_eq!(num_failed, 3);
+        match multi_target_send(&sender, &packets[0], &dest_refs).await {
+            Ok(()) => panic!(),
+            Err(SendPktsError::IoError(ioerror, num_failed)) => {
+                assert_matches!(ioerror.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(num_failed, 3);
+            }
         }
     }
 }

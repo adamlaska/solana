@@ -1,6 +1,6 @@
 //! Instructions for the [secp256k1 native program][np].
 //!
-//! [np]: https://docs.solana.com/developing/runtime-facilities/programs#secp256k1-program
+//! [np]: https://docs.solanalabs.com/runtime/programs#secp256k1-program
 //!
 //! _This module provides low-level cryptographic building blocks that must be
 //! used carefully to ensure proper security. Read this documentation and
@@ -417,9 +417,9 @@
 //! The client program:
 //!
 //! ```no_run
-//! # use solana_sdk::example_mocks::solana_client;
+//! # use solana_sdk::example_mocks::solana_rpc_client;
 //! use anyhow::Result;
-//! use solana_client::rpc_client::RpcClient;
+//! use solana_rpc_client::rpc_client::RpcClient;
 //! use solana_sdk::{
 //!     instruction::{AccountMeta, Instruction},
 //!     secp256k1_instruction,
@@ -633,9 +633,9 @@
 //! The client program:
 //!
 //! ```no_run
-//! # use solana_sdk::example_mocks::solana_client;
+//! # use solana_sdk::example_mocks::solana_rpc_client;
 //! use anyhow::Result;
-//! use solana_client::rpc_client::RpcClient;
+//! use solana_rpc_client::rpc_client::RpcClient;
 //! use solana_sdk::{
 //!     instruction::{AccountMeta, Instruction},
 //!     keccak,
@@ -733,7 +733,7 @@
 //!     // Sign some messages.
 //!     let mut signatures = vec![];
 //!     for idx in 0..2 {
-//!         let secret_key = libsecp256k1::SecretKey::random(&mut rand::thread_rng());
+//!         let secret_key = libsecp256k1::SecretKey::random(&mut rand0_7::thread_rng());
 //!         let message = format!("hello world {}", idx).into_bytes();
 //!         let message_hash = {
 //!             let mut hasher = keccak::Hasher::default();
@@ -790,15 +790,13 @@
 use {
     crate::{
         feature_set::{
-            libsecp256k1_0_5_upgrade_enabled, libsecp256k1_fail_on_bad_count,
-            libsecp256k1_fail_on_bad_count2, FeatureSet,
+            libsecp256k1_fail_on_bad_count, libsecp256k1_fail_on_bad_count2, FeatureSet,
         },
         instruction::Instruction,
         precompiles::PrecompileError,
     },
     digest::Digest,
     serde_derive::{Deserialize, Serialize},
-    std::sync::Arc,
 };
 
 pub const HASHED_PUBKEY_SERIALIZED_SIZE: usize = 20;
@@ -811,7 +809,7 @@ pub const DATA_START: usize = SIGNATURE_OFFSETS_SERIALIZED_SIZE + 1;
 /// See the [module documentation][md] for a complete description.
 ///
 /// [md]: self
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct SecpSignatureOffsets {
     /// Offset to 64-byte signature plus 1-byte recovery ID.
     pub signature_offset: u16,
@@ -852,7 +850,7 @@ pub fn new_secp256k1_instruction(
     let secp_pubkey = libsecp256k1::PublicKey::from_secret_key(priv_key);
     let eth_pubkey = construct_eth_pubkey(&secp_pubkey);
     let mut hasher = sha3::Keccak256::new();
-    hasher.update(&message_arr);
+    hasher.update(message_arr);
     let message_hash = hasher.finalize();
     let mut message_hash_arr = [0u8; 32];
     message_hash_arr.copy_from_slice(message_hash.as_slice());
@@ -861,15 +859,13 @@ pub fn new_secp256k1_instruction(
     let signature_arr = signature.serialize();
     assert_eq!(signature_arr.len(), SIGNATURE_SERIALIZED_SIZE);
 
-    let mut instruction_data = vec![];
-    instruction_data.resize(
-        DATA_START
-            .saturating_add(eth_pubkey.len())
-            .saturating_add(signature_arr.len())
-            .saturating_add(message_arr.len())
-            .saturating_add(1),
-        0,
-    );
+    let instruction_data_len = DATA_START
+        .saturating_add(eth_pubkey.len())
+        .saturating_add(signature_arr.len())
+        .saturating_add(message_arr.len())
+        .saturating_add(1);
+    let mut instruction_data = vec![0; instruction_data_len];
+
     let eth_address_offset = DATA_START;
     instruction_data[eth_address_offset..eth_address_offset.saturating_add(eth_pubkey.len())]
         .copy_from_slice(&eth_pubkey);
@@ -929,11 +925,11 @@ pub fn construct_eth_pubkey(
 /// `feature_set` is the set of active Solana features. It is used to enable or
 /// disable a few minor additional checks that were activated on chain
 /// subsequent to the addition of the secp256k1 native program. For many
-/// purposes passing `Arc::new<FeatureSet::all_enabled()>` is reasonable.
+/// purposes passing `FeatureSet::all_enabled()` is reasonable.
 pub fn verify(
     data: &[u8],
     instruction_datas: &[&[u8]],
-    feature_set: &Arc<FeatureSet>,
+    feature_set: &FeatureSet,
 ) -> Result<(), PrecompileError> {
     if data.is_empty() {
         return Err(PrecompileError::InvalidInstructionDataSize);
@@ -976,17 +972,10 @@ pub fn verify(
             return Err(PrecompileError::InvalidSignature);
         }
 
-        let sig_parse_result = if feature_set.is_active(&libsecp256k1_0_5_upgrade_enabled::id()) {
-            libsecp256k1::Signature::parse_standard_slice(
-                &signature_instruction[sig_start..sig_end],
-            )
-        } else {
-            libsecp256k1::Signature::parse_overflowing_slice(
-                &signature_instruction[sig_start..sig_end],
-            )
-        };
-
-        let signature = sig_parse_result.map_err(|_| PrecompileError::InvalidSignature)?;
+        let signature = libsecp256k1::Signature::parse_standard_slice(
+            &signature_instruction[sig_start..sig_end],
+        )
+        .map_err(|_| PrecompileError::InvalidSignature)?;
 
         let recovery_id = libsecp256k1::RecoveryId::parse(signature_instruction[sig_end])
             .map_err(|_| PrecompileError::InvalidRecoveryId)?;
@@ -1060,8 +1049,7 @@ pub mod test {
             signature::{Keypair, Signer},
             transaction::Transaction,
         },
-        rand::{thread_rng, Rng},
-        std::sync::Arc,
+        rand0_7::{thread_rng, Rng},
     };
 
     fn test_case(
@@ -1072,15 +1060,8 @@ pub mod test {
         instruction_data[0] = num_signatures;
         let writer = std::io::Cursor::new(&mut instruction_data[1..]);
         bincode::serialize_into(writer, &offsets).unwrap();
-        let mut feature_set = FeatureSet::all_enabled();
-        feature_set
-            .active
-            .remove(&libsecp256k1_0_5_upgrade_enabled::id());
-        feature_set
-            .inactive
-            .insert(libsecp256k1_0_5_upgrade_enabled::id());
-
-        verify(&instruction_data, &[&[0u8; 100]], &Arc::new(feature_set))
+        let feature_set = FeatureSet::all_enabled();
+        verify(&instruction_data, &[&[0u8; 100]], &feature_set)
     }
 
     #[test]
@@ -1093,16 +1074,10 @@ pub mod test {
         let writer = std::io::Cursor::new(&mut instruction_data[1..]);
         bincode::serialize_into(writer, &offsets).unwrap();
         instruction_data.truncate(instruction_data.len() - 1);
-        let mut feature_set = FeatureSet::all_enabled();
-        feature_set
-            .active
-            .remove(&libsecp256k1_0_5_upgrade_enabled::id());
-        feature_set
-            .inactive
-            .insert(libsecp256k1_0_5_upgrade_enabled::id());
+        let feature_set = FeatureSet::all_enabled();
 
         assert_eq!(
-            verify(&instruction_data, &[&[0u8; 100]], &Arc::new(feature_set)),
+            verify(&instruction_data, &[&[0u8; 100]], &feature_set),
             Err(PrecompileError::InvalidInstructionDataSize)
         );
 
@@ -1228,16 +1203,10 @@ pub mod test {
         instruction_data[0] = 0;
         let writer = std::io::Cursor::new(&mut instruction_data[1..]);
         bincode::serialize_into(writer, &offsets).unwrap();
-        let mut feature_set = FeatureSet::all_enabled();
-        feature_set
-            .active
-            .remove(&libsecp256k1_0_5_upgrade_enabled::id());
-        feature_set
-            .inactive
-            .insert(libsecp256k1_0_5_upgrade_enabled::id());
+        let feature_set = FeatureSet::all_enabled();
 
         assert_eq!(
-            verify(&instruction_data, &[&[0u8; 100]], &Arc::new(feature_set)),
+            verify(&instruction_data, &[&[0u8; 100]], &feature_set),
             Err(PrecompileError::InvalidInstructionDataSize)
         );
     }
@@ -1255,14 +1224,7 @@ pub mod test {
         let message_arr = b"hello";
         let mut secp_instruction = new_secp256k1_instruction(&secp_privkey, message_arr);
         let mint_keypair = Keypair::new();
-        let mut feature_set = feature_set::FeatureSet::all_enabled();
-        feature_set
-            .active
-            .remove(&feature_set::libsecp256k1_0_5_upgrade_enabled::id());
-        feature_set
-            .inactive
-            .insert(feature_set::libsecp256k1_0_5_upgrade_enabled::id());
-        let feature_set = Arc::new(feature_set);
+        let feature_set = feature_set::FeatureSet::all_enabled();
 
         let tx = Transaction::new_signed_with_payer(
             &[secp_instruction.clone()],
@@ -1318,7 +1280,7 @@ pub mod test {
             data.extend(signature.serialize());
             data.push(recovery_id.serialize());
             let eth_address_offset = data.len();
-            data.extend(&eth_address);
+            data.extend(eth_address);
             let message_data_offset = data.len();
             data.extend(message);
 
@@ -1349,7 +1311,7 @@ pub mod test {
         verify(
             &instruction_data,
             &[&instruction_data],
-            &Arc::new(FeatureSet::all_enabled()),
+            &FeatureSet::all_enabled(),
         )
         .unwrap();
     }

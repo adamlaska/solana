@@ -27,69 +27,56 @@ pub fn parse_associated_token(
             ));
         }
     }
-    if instruction.data.is_empty() {
-        check_num_associated_token_accounts(&instruction.accounts, 7)?;
-        Ok(ParsedInstructionEnum {
-            instruction_type: "create".to_string(),
-            info: json!({
-                "source": account_keys[instruction.accounts[0] as usize].to_string(),
-                "account": account_keys[instruction.accounts[1] as usize].to_string(),
-                "wallet": account_keys[instruction.accounts[2] as usize].to_string(),
-                "mint": account_keys[instruction.accounts[3] as usize].to_string(),
-                "systemProgram": account_keys[instruction.accounts[4] as usize].to_string(),
-                "tokenProgram": account_keys[instruction.accounts[5] as usize].to_string(),
-                "rentSysvar": account_keys[instruction.accounts[6] as usize].to_string(),
-            }),
-        })
+    let ata_instruction = if instruction.data.is_empty() {
+        AssociatedTokenAccountInstruction::Create
     } else {
-        let ata_instruction = AssociatedTokenAccountInstruction::try_from_slice(&instruction.data)
-            .map_err(|_| {
-                ParseInstructionError::InstructionNotParsable(ParsableProgram::SplToken)
-            })?;
-        match ata_instruction {
-            AssociatedTokenAccountInstruction::Create => {
-                check_num_associated_token_accounts(&instruction.accounts, 6)?;
-                Ok(ParsedInstructionEnum {
-                    instruction_type: "create".to_string(),
-                    info: json!({
-                        "source": account_keys[instruction.accounts[0] as usize].to_string(),
-                        "account": account_keys[instruction.accounts[1] as usize].to_string(),
-                        "wallet": account_keys[instruction.accounts[2] as usize].to_string(),
-                        "mint": account_keys[instruction.accounts[3] as usize].to_string(),
-                        "systemProgram": account_keys[instruction.accounts[4] as usize].to_string(),
-                        "tokenProgram": account_keys[instruction.accounts[5] as usize].to_string(),
-                    }),
-                })
-            }
-            AssociatedTokenAccountInstruction::CreateIdempotent => {
-                check_num_associated_token_accounts(&instruction.accounts, 6)?;
-                Ok(ParsedInstructionEnum {
-                    instruction_type: "createIdempotent".to_string(),
-                    info: json!({
-                        "source": account_keys[instruction.accounts[0] as usize].to_string(),
-                        "account": account_keys[instruction.accounts[1] as usize].to_string(),
-                        "wallet": account_keys[instruction.accounts[2] as usize].to_string(),
-                        "mint": account_keys[instruction.accounts[3] as usize].to_string(),
-                        "systemProgram": account_keys[instruction.accounts[4] as usize].to_string(),
-                        "tokenProgram": account_keys[instruction.accounts[5] as usize].to_string(),
-                    }),
-                })
-            }
-            AssociatedTokenAccountInstruction::RecoverNested => {
-                check_num_associated_token_accounts(&instruction.accounts, 7)?;
-                Ok(ParsedInstructionEnum {
-                    instruction_type: "recoverNested".to_string(),
-                    info: json!({
-                        "nestedSource": account_keys[instruction.accounts[0] as usize].to_string(),
-                        "nestedMint": account_keys[instruction.accounts[1] as usize].to_string(),
-                        "destination": account_keys[instruction.accounts[2] as usize].to_string(),
-                        "nestedOwner": account_keys[instruction.accounts[3] as usize].to_string(),
-                        "ownerMint": account_keys[instruction.accounts[4] as usize].to_string(),
-                        "wallet": account_keys[instruction.accounts[5] as usize].to_string(),
-                        "tokenProgram": account_keys[instruction.accounts[6] as usize].to_string(),
-                    }),
-                })
-            }
+        AssociatedTokenAccountInstruction::try_from_slice(&instruction.data)
+            .map_err(|_| ParseInstructionError::InstructionNotParsable(ParsableProgram::SplToken))?
+    };
+
+    match ata_instruction {
+        AssociatedTokenAccountInstruction::Create => {
+            check_num_associated_token_accounts(&instruction.accounts, 6)?;
+            Ok(ParsedInstructionEnum {
+                instruction_type: "create".to_string(),
+                info: json!({
+                    "source": account_keys[instruction.accounts[0] as usize].to_string(),
+                    "account": account_keys[instruction.accounts[1] as usize].to_string(),
+                    "wallet": account_keys[instruction.accounts[2] as usize].to_string(),
+                    "mint": account_keys[instruction.accounts[3] as usize].to_string(),
+                    "systemProgram": account_keys[instruction.accounts[4] as usize].to_string(),
+                    "tokenProgram": account_keys[instruction.accounts[5] as usize].to_string(),
+                }),
+            })
+        }
+        AssociatedTokenAccountInstruction::CreateIdempotent => {
+            check_num_associated_token_accounts(&instruction.accounts, 6)?;
+            Ok(ParsedInstructionEnum {
+                instruction_type: "createIdempotent".to_string(),
+                info: json!({
+                    "source": account_keys[instruction.accounts[0] as usize].to_string(),
+                    "account": account_keys[instruction.accounts[1] as usize].to_string(),
+                    "wallet": account_keys[instruction.accounts[2] as usize].to_string(),
+                    "mint": account_keys[instruction.accounts[3] as usize].to_string(),
+                    "systemProgram": account_keys[instruction.accounts[4] as usize].to_string(),
+                    "tokenProgram": account_keys[instruction.accounts[5] as usize].to_string(),
+                }),
+            })
+        }
+        AssociatedTokenAccountInstruction::RecoverNested => {
+            check_num_associated_token_accounts(&instruction.accounts, 7)?;
+            Ok(ParsedInstructionEnum {
+                instruction_type: "recoverNested".to_string(),
+                info: json!({
+                    "nestedSource": account_keys[instruction.accounts[0] as usize].to_string(),
+                    "nestedMint": account_keys[instruction.accounts[1] as usize].to_string(),
+                    "destination": account_keys[instruction.accounts[2] as usize].to_string(),
+                    "nestedOwner": account_keys[instruction.accounts[3] as usize].to_string(),
+                    "ownerMint": account_keys[instruction.accounts[4] as usize].to_string(),
+                    "wallet": account_keys[instruction.accounts[5] as usize].to_string(),
+                    "tokenProgram": account_keys[instruction.accounts[6] as usize].to_string(),
+                }),
+            })
         }
     }
 }
@@ -107,80 +94,67 @@ mod test {
     use spl_associated_token_account::create_associated_token_account as create_associated_token_account_deprecated;
     use {
         super::*,
-        solana_account_decoder::parse_token::pubkey_from_spl_token,
+        solana_sdk::{message::Message, sysvar},
         spl_associated_token_account::{
             get_associated_token_address, get_associated_token_address_with_program_id,
             instruction::{
                 create_associated_token_account, create_associated_token_account_idempotent,
                 recover_nested,
             },
-            solana_program::{
-                instruction::CompiledInstruction as SplAssociatedTokenCompiledInstruction,
-                message::Message, pubkey::Pubkey as SplAssociatedTokenPubkey, sysvar,
-            },
         },
     };
-
-    fn convert_pubkey(pubkey: Pubkey) -> SplAssociatedTokenPubkey {
-        SplAssociatedTokenPubkey::new_from_array(pubkey.to_bytes())
-    }
-
-    fn convert_compiled_instruction(
-        instruction: &SplAssociatedTokenCompiledInstruction,
-    ) -> CompiledInstruction {
-        CompiledInstruction {
-            program_id_index: instruction.program_id_index,
-            accounts: instruction.accounts.clone(),
-            data: instruction.data.clone(),
-        }
-    }
-
-    fn convert_account_keys(message: &Message) -> Vec<Pubkey> {
-        message
-            .account_keys
-            .iter()
-            .map(pubkey_from_spl_token)
-            .collect()
-    }
 
     #[test]
     fn test_parse_create_deprecated() {
         let funder = Pubkey::new_unique();
         let wallet_address = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
-        let associated_account_address =
-            get_associated_token_address(&convert_pubkey(wallet_address), &convert_pubkey(mint));
+        let associated_account_address = get_associated_token_address(&wallet_address, &mint);
         #[allow(deprecated)]
-        let create_ix = create_associated_token_account_deprecated(
-            &convert_pubkey(funder),
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(mint),
-        );
-        let message = Message::new(&[create_ix], None);
-        let mut compiled_instruction = convert_compiled_instruction(&message.instructions[0]);
+        let create_ix = create_associated_token_account_deprecated(&funder, &wallet_address, &mint);
+        let mut message = Message::new(&[create_ix], None);
+        let compiled_instruction = &mut message.instructions[0];
+        let expected_parsed_ix = ParsedInstructionEnum {
+            instruction_type: "create".to_string(),
+            info: json!({
+                "source": funder.to_string(),
+                "account": associated_account_address.to_string(),
+                "wallet": wallet_address.to_string(),
+                "mint": mint.to_string(),
+                "systemProgram": solana_sdk::system_program::id().to_string(),
+                "tokenProgram": spl_token::id().to_string(),
+            }),
+        };
         assert_eq!(
             parse_associated_token(
-                &compiled_instruction,
-                &AccountKeys::new(&convert_account_keys(&message), None)
+                compiled_instruction,
+                &AccountKeys::new(&message.account_keys, None)
             )
             .unwrap(),
-            ParsedInstructionEnum {
-                instruction_type: "create".to_string(),
-                info: json!({
-                    "source": funder.to_string(),
-                    "account": associated_account_address.to_string(),
-                    "wallet": wallet_address.to_string(),
-                    "mint": mint.to_string(),
-                    "systemProgram": solana_sdk::system_program::id().to_string(),
-                    "tokenProgram": spl_token::id().to_string(),
-                    "rentSysvar": sysvar::rent::id().to_string(),
-                })
-            }
+            expected_parsed_ix,
         );
+
+        // after popping rent account, parsing should still succeed
+        let rent_account_index = compiled_instruction
+            .accounts
+            .iter()
+            .position(|index| message.account_keys[*index as usize] == sysvar::rent::id())
+            .unwrap();
+        compiled_instruction.accounts.remove(rent_account_index);
+        assert_eq!(
+            parse_associated_token(
+                compiled_instruction,
+                &AccountKeys::new(&message.account_keys, None)
+            )
+            .unwrap(),
+            expected_parsed_ix,
+        );
+
+        // after popping another account, parsing should fail
         compiled_instruction.accounts.pop();
         assert!(parse_associated_token(
-            &compiled_instruction,
-            &AccountKeys::new(&convert_account_keys(&message), None)
+            compiled_instruction,
+            &AccountKeys::new(&message.account_keys, None)
         )
         .is_err());
     }
@@ -191,23 +165,16 @@ mod test {
         let wallet_address = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
         let token_program_id = Pubkey::new_unique();
-        let associated_account_address = get_associated_token_address_with_program_id(
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(mint),
-            &convert_pubkey(token_program_id),
-        );
-        let create_ix = create_associated_token_account(
-            &convert_pubkey(funder),
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(mint),
-            &convert_pubkey(token_program_id),
-        );
-        let message = Message::new(&[create_ix], None);
-        let mut compiled_instruction = convert_compiled_instruction(&message.instructions[0]);
+        let associated_account_address =
+            get_associated_token_address_with_program_id(&wallet_address, &mint, &token_program_id);
+        let create_ix =
+            create_associated_token_account(&funder, &wallet_address, &mint, &token_program_id);
+        let mut message = Message::new(&[create_ix], None);
+        let compiled_instruction = &mut message.instructions[0];
         assert_eq!(
             parse_associated_token(
-                &compiled_instruction,
-                &AccountKeys::new(&convert_account_keys(&message), None)
+                compiled_instruction,
+                &AccountKeys::new(&message.account_keys, None)
             )
             .unwrap(),
             ParsedInstructionEnum {
@@ -224,8 +191,8 @@ mod test {
         );
         compiled_instruction.accounts.pop();
         assert!(parse_associated_token(
-            &compiled_instruction,
-            &AccountKeys::new(&convert_account_keys(&message), None)
+            compiled_instruction,
+            &AccountKeys::new(&message.account_keys, None)
         )
         .is_err());
     }
@@ -236,23 +203,20 @@ mod test {
         let wallet_address = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
         let token_program_id = Pubkey::new_unique();
-        let associated_account_address = get_associated_token_address_with_program_id(
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(mint),
-            &convert_pubkey(token_program_id),
-        );
+        let associated_account_address =
+            get_associated_token_address_with_program_id(&wallet_address, &mint, &token_program_id);
         let create_ix = create_associated_token_account_idempotent(
-            &convert_pubkey(funder),
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(mint),
-            &convert_pubkey(token_program_id),
+            &funder,
+            &wallet_address,
+            &mint,
+            &token_program_id,
         );
-        let message = Message::new(&[create_ix], None);
-        let mut compiled_instruction = convert_compiled_instruction(&message.instructions[0]);
+        let mut message = Message::new(&[create_ix], None);
+        let compiled_instruction = &mut message.instructions[0];
         assert_eq!(
             parse_associated_token(
-                &compiled_instruction,
-                &AccountKeys::new(&convert_account_keys(&message), None)
+                compiled_instruction,
+                &AccountKeys::new(&message.account_keys, None)
             )
             .unwrap(),
             ParsedInstructionEnum {
@@ -269,8 +233,8 @@ mod test {
         );
         compiled_instruction.accounts.pop();
         assert!(parse_associated_token(
-            &compiled_instruction,
-            &AccountKeys::new(&convert_account_keys(&message), None)
+            compiled_instruction,
+            &AccountKeys::new(&message.account_keys, None)
         )
         .is_err());
     }
@@ -282,32 +246,32 @@ mod test {
         let nested_mint = Pubkey::new_unique();
         let token_program_id = Pubkey::new_unique();
         let owner_associated_account_address = get_associated_token_address_with_program_id(
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(owner_mint),
-            &convert_pubkey(token_program_id),
+            &wallet_address,
+            &owner_mint,
+            &token_program_id,
         );
         let nested_associated_account_address = get_associated_token_address_with_program_id(
             &owner_associated_account_address,
-            &convert_pubkey(nested_mint),
-            &convert_pubkey(token_program_id),
+            &nested_mint,
+            &token_program_id,
         );
         let destination_associated_account_address = get_associated_token_address_with_program_id(
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(nested_mint),
-            &convert_pubkey(token_program_id),
+            &wallet_address,
+            &nested_mint,
+            &token_program_id,
         );
         let recover_ix = recover_nested(
-            &convert_pubkey(wallet_address),
-            &convert_pubkey(owner_mint),
-            &convert_pubkey(nested_mint),
-            &convert_pubkey(token_program_id),
+            &wallet_address,
+            &owner_mint,
+            &nested_mint,
+            &token_program_id,
         );
-        let message = Message::new(&[recover_ix], None);
-        let mut compiled_instruction = convert_compiled_instruction(&message.instructions[0]);
+        let mut message = Message::new(&[recover_ix], None);
+        let compiled_instruction = &mut message.instructions[0];
         assert_eq!(
             parse_associated_token(
-                &compiled_instruction,
-                &AccountKeys::new(&convert_account_keys(&message), None)
+                compiled_instruction,
+                &AccountKeys::new(&message.account_keys, None)
             )
             .unwrap(),
             ParsedInstructionEnum {
@@ -325,8 +289,8 @@ mod test {
         );
         compiled_instruction.accounts.pop();
         assert!(parse_associated_token(
-            &compiled_instruction,
-            &AccountKeys::new(&convert_account_keys(&message), None)
+            compiled_instruction,
+            &AccountKeys::new(&message.account_keys, None)
         )
         .is_err());
     }

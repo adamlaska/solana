@@ -1,4 +1,4 @@
-//! The Rust-based BPF program entry point supported by the latest BPF loader.
+//! The Rust-based BPF program entrypoint supported by the latest BPF loader.
 //!
 //! For more information see the [`bpf_loader`] module.
 //!
@@ -39,7 +39,7 @@ pub const HEAP_LENGTH: usize = 32 * 1024;
 /// Value used to indicate that a serialized account is not a duplicate
 pub const NON_DUP_MARKER: u8 = u8::MAX;
 
-/// Declare the program entry point and set up global handlers.
+/// Declare the program entrypoint and set up global handlers.
 ///
 /// This macro emits the common boilerplate necessary to begin program
 /// execution, calling a provided function to process the program instruction
@@ -47,6 +47,9 @@ pub const NON_DUP_MARKER: u8 = u8::MAX;
 ///
 /// It also sets up a [global allocator] and [panic handler], using the
 /// [`custom_heap_default`] and [`custom_panic_default`] macros.
+///
+/// [`custom_heap_default`]: crate::custom_heap_default
+/// [`custom_panic_default`]: crate::custom_panic_default
 ///
 /// [global allocator]: https://doc.rust-lang.org/stable/std/alloc/trait.GlobalAlloc.html
 /// [panic handler]: https://doc.rust-lang.org/nomicon/panic-handler.html
@@ -88,7 +91,7 @@ pub const NON_DUP_MARKER: u8 = u8::MAX;
 ///
 /// # Examples
 ///
-/// Defining an entry point and making it conditional on the `no-entrypoint`
+/// Defining an entrypoint and making it conditional on the `no-entrypoint`
 /// feature. Although the `entrypoint` module is written inline in this example,
 /// it is common to put it into its own file.
 ///
@@ -143,7 +146,7 @@ macro_rules! entrypoint {
 /// for [BPF] targets.
 ///
 /// [Cargo features]: https://doc.rust-lang.org/cargo/reference/features.html
-/// [BPF]: https://docs.solana.com/developing/on-chain-programs/overview#berkeley-packet-filter-bpf
+/// [BPF]: https://solana.com/docs/programs/faq#berkeley-packet-filter-bpf
 ///
 /// # Cargo features
 ///
@@ -178,7 +181,7 @@ macro_rules! custom_heap_default {
 /// for [BPF] targets.
 ///
 /// [Cargo features]: https://doc.rust-lang.org/cargo/reference/features.html
-/// [BPF]: https://docs.solana.com/developing/on-chain-programs/overview#berkeley-packet-filter-bpf
+/// [BPF]: https://solana.com/docs/programs/faq#berkeley-packet-filter-bpf
 ///
 /// # Cargo features
 ///
@@ -231,7 +234,7 @@ pub struct BumpAllocator {
 /// Integer arithmetic in this global allocator implementation is safe when
 /// operating on the prescribed `HEAP_START_ADDRESS` and `HEAP_LENGTH`. Any
 /// other use may overflow and is thus unsupported and at one's own risk.
-#[allow(clippy::integer_arithmetic)]
+#[allow(clippy::arithmetic_side_effects)]
 unsafe impl std::alloc::GlobalAlloc for BumpAllocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -269,7 +272,7 @@ pub const BPF_ALIGN_OF_U128: usize = 8;
 /// done at one's own risk.
 ///
 /// # Safety
-#[allow(clippy::integer_arithmetic)]
+#[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::type_complexity)]
 pub unsafe fn deserialize<'a>(input: *mut u8) -> (&'a Pubkey, Vec<AccountInfo<'a>>, &'a [u8]) {
     let mut offset: usize = 0;
@@ -375,7 +378,7 @@ mod test {
     fn test_bump_allocator() {
         // alloc the entire
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),
@@ -395,7 +398,7 @@ mod test {
         }
         // check alignment
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),
@@ -420,7 +423,7 @@ mod test {
         }
         // alloc entire block (minus the pos ptr)
         {
-            let heap = vec![0u8; 128];
+            let heap = [0u8; 128];
             let allocator = BumpAllocator {
                 start: heap.as_ptr() as *const _ as usize,
                 len: heap.len(),

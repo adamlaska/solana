@@ -1,5 +1,23 @@
+//! Information about recent blocks and their fee calculators.
+//!
+//! The _recent blockhashes sysvar_ provides access to the [`RecentBlockhashes`],
+//! which contains recent blockhahes and their [`FeeCalculator`]s.
+//!
+//! [`RecentBlockhashes`] does not implement [`Sysvar::get`].
+//!
+//! This sysvar is deprecated and should not be used. Transaction fees should be
+//! determined with the [`getFeeForMessage`] RPC method. For additional context
+//! see the [Comprehensive Compute Fees proposal][ccf].
+//!
+//! [`getFeeForMessage`]: https://solana.com/docs/rpc/http/getfeeformessage
+//! [ccf]: https://docs.solanalabs.com/proposals/comprehensive-compute-fees
+//!
+//! See also the Solana [documentation on the recent blockhashes sysvar][sdoc].
+//!
+//! [sdoc]: https://docs.solanalabs.com/runtime/sysvars#recentblockhashes
+
 #![allow(deprecated)]
-#![allow(clippy::integer_arithmetic)]
+#![allow(clippy::arithmetic_side_effects)]
 use {
     crate::{
         declare_deprecated_sysvar_id, fee_calculator::FeeCalculator, hash::Hash, sysvar::Sysvar,

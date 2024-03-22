@@ -33,7 +33,8 @@ pub struct BlockstoreInsertionMetrics {
     pub num_recovered_failed_sig: usize,
     pub num_recovered_failed_invalid: usize,
     pub num_recovered_exists: usize,
-    pub num_data_shreds_exists: usize,
+    pub num_repaired_data_shreds_exists: usize,
+    pub num_turbine_data_shreds_exists: usize,
     pub num_data_shreds_invalid: usize,
     pub num_data_shreds_blockstore_error: usize,
     pub num_coding_shreds_exists: usize,
@@ -102,7 +103,16 @@ impl BlockstoreInsertionMetrics {
                 self.num_recovered_blockstore_error,
                 i64
             ),
-            ("num_data_shreds_exists", self.num_data_shreds_exists, i64),
+            (
+                "num_repaired_data_shreds_exists",
+                self.num_repaired_data_shreds_exists,
+                i64
+            ),
+            (
+                "num_turbine_data_shreds_exists",
+                self.num_turbine_data_shreds_exists,
+                i64
+            ),
             ("num_data_shreds_invalid", self.num_data_shreds_invalid, i64),
             (
                 "num_data_shreds_blockstore_error",
@@ -130,6 +140,104 @@ impl BlockstoreInsertionMetrics {
                 i64
             ),
         );
+    }
+}
+
+/// A metrics struct to track the number of times Blockstore RPC function are called.
+#[derive(Default)]
+pub(crate) struct BlockstoreRpcApiMetrics {
+    pub num_get_block_height: AtomicU64,
+    pub num_get_complete_transaction: AtomicU64,
+    pub num_get_confirmed_signatures_for_address: AtomicU64,
+    pub num_get_confirmed_signatures_for_address2: AtomicU64,
+    pub num_get_rooted_block: AtomicU64,
+    pub num_get_rooted_block_time: AtomicU64,
+    pub num_get_rooted_transaction: AtomicU64,
+    pub num_get_rooted_transaction_status: AtomicU64,
+    pub num_get_rooted_block_with_entries: AtomicU64,
+    pub num_get_transaction_status: AtomicU64,
+}
+
+impl BlockstoreRpcApiMetrics {
+    pub fn report(&self) {
+        let num_get_block_height = self.num_get_block_height.swap(0, Ordering::Relaxed);
+        let num_get_complete_transaction =
+            self.num_get_complete_transaction.swap(0, Ordering::Relaxed);
+        let num_get_confirmed_signatures_for_address = self
+            .num_get_confirmed_signatures_for_address
+            .swap(0, Ordering::Relaxed);
+        let num_get_confirmed_signatures_for_address2 = self
+            .num_get_confirmed_signatures_for_address2
+            .swap(0, Ordering::Relaxed);
+        let num_get_rooted_block = self.num_get_rooted_block.swap(0, Ordering::Relaxed);
+        let num_get_rooted_block_time = self.num_get_rooted_block_time.swap(0, Ordering::Relaxed);
+        let num_get_rooted_transaction = self.num_get_rooted_transaction.swap(0, Ordering::Relaxed);
+        let num_get_rooted_transaction_status = self
+            .num_get_rooted_transaction_status
+            .swap(0, Ordering::Relaxed);
+        let num_get_rooted_block_with_entries = self
+            .num_get_rooted_block_with_entries
+            .swap(0, Ordering::Relaxed);
+        let num_get_transaction_status = self.num_get_transaction_status.swap(0, Ordering::Relaxed);
+
+        let total_num_queries = num_get_block_height
+            .saturating_add(num_get_complete_transaction)
+            .saturating_add(num_get_confirmed_signatures_for_address)
+            .saturating_add(num_get_confirmed_signatures_for_address2)
+            .saturating_add(num_get_rooted_block)
+            .saturating_add(num_get_rooted_block_time)
+            .saturating_add(num_get_rooted_transaction)
+            .saturating_add(num_get_rooted_transaction_status)
+            .saturating_add(num_get_rooted_block_with_entries)
+            .saturating_add(num_get_transaction_status);
+
+        if total_num_queries > 0 {
+            datapoint_info!(
+                "blockstore-rpc-api",
+                ("num_get_block_height", num_get_block_height as i64, i64),
+                (
+                    "num_get_complete_transaction",
+                    num_get_complete_transaction as i64,
+                    i64
+                ),
+                (
+                    "num_get_confirmed_signatures_for_address",
+                    num_get_confirmed_signatures_for_address as i64,
+                    i64
+                ),
+                (
+                    "num_get_confirmed_signatures_for_address2",
+                    num_get_confirmed_signatures_for_address2 as i64,
+                    i64
+                ),
+                ("num_get_rooted_block", num_get_rooted_block as i64, i64),
+                (
+                    "num_get_rooted_block_time",
+                    num_get_rooted_block_time as i64,
+                    i64
+                ),
+                (
+                    "num_get_rooted_transaction",
+                    num_get_rooted_transaction as i64,
+                    i64
+                ),
+                (
+                    "num_get_rooted_transaction_status",
+                    num_get_rooted_transaction_status as i64,
+                    i64
+                ),
+                (
+                    "num_get_rooted_block_with_entries",
+                    num_get_rooted_block_with_entries as i64,
+                    i64
+                ),
+                (
+                    "num_get_transaction_status",
+                    num_get_transaction_status as i64,
+                    i64
+                ),
+            );
+        }
     }
 }
 
@@ -230,7 +338,7 @@ pub struct BlockstoreRocksDbColumnFamilyMetrics {
 
 impl BlockstoreRocksDbColumnFamilyMetrics {
     /// Report metrics with the specified metric name and column family tag.
-    /// The metric name and the column family tag is embeded in the parameter
+    /// The metric name and the column family tag is embedded in the parameter
     /// `metric_name_and_cf_tag` with the following format.
     ///
     /// For example, "blockstore_rocksdb_cfs,cf_name=shred_data".
@@ -244,62 +352,62 @@ impl BlockstoreRocksDbColumnFamilyMetrics {
             // Size related
             (
                 "total_sst_files_size",
-                self.total_sst_files_size as i64,
+                self.total_sst_files_size,
                 i64
             ),
-            ("size_all_mem_tables", self.size_all_mem_tables as i64, i64),
+            ("size_all_mem_tables", self.size_all_mem_tables, i64),
             // Snapshot related
-            ("num_snapshots", self.num_snapshots as i64, i64),
+            ("num_snapshots", self.num_snapshots, i64),
             (
                 "oldest_snapshot_time",
-                self.oldest_snapshot_time as i64,
+                self.oldest_snapshot_time,
                 i64
             ),
             // Write related
             (
                 "actual_delayed_write_rate",
-                self.actual_delayed_write_rate as i64,
+                self.actual_delayed_write_rate,
                 i64
             ),
-            ("is_write_stopped", self.is_write_stopped as i64, i64),
+            ("is_write_stopped", self.is_write_stopped, i64),
             // Memory / block cache related
             (
                 "block_cache_capacity",
-                self.block_cache_capacity as i64,
+                self.block_cache_capacity,
                 i64
             ),
-            ("block_cache_usage", self.block_cache_usage as i64, i64),
+            ("block_cache_usage", self.block_cache_usage, i64),
             (
                 "block_cache_pinned_usage",
-                self.block_cache_pinned_usage as i64,
+                self.block_cache_pinned_usage,
                 i64
             ),
             (
                 "estimate_table_readers_mem",
-                self.estimate_table_readers_mem as i64,
+                self.estimate_table_readers_mem,
                 i64
             ),
             // Flush and compaction
             (
                 "mem_table_flush_pending",
-                self.mem_table_flush_pending as i64,
+                self.mem_table_flush_pending,
                 i64
             ),
-            ("compaction_pending", self.compaction_pending as i64, i64),
+            ("compaction_pending", self.compaction_pending, i64),
             (
                 "num_running_compactions",
-                self.num_running_compactions as i64,
+                self.num_running_compactions,
                 i64
             ),
-            ("num_running_flushes", self.num_running_flushes as i64, i64),
+            ("num_running_flushes", self.num_running_flushes, i64),
             // FIFO Compaction related
             (
                 "estimate_oldest_key_time",
-                self.estimate_oldest_key_time as i64,
+                self.estimate_oldest_key_time,
                 i64
             ),
             // Misc
-            ("background_errors", self.background_errors as i64, i64),
+            ("background_errors", self.background_errors, i64),
         );
     }
 }
@@ -310,7 +418,7 @@ thread_local! {static PER_THREAD_ROCKS_PERF_CONTEXT: RefCell<PerfContext> = RefC
 // The minimum time duration between two RocksDB perf samples of the same operation.
 const PERF_SAMPLING_MIN_DURATION: Duration = Duration::from_secs(1);
 pub(crate) const PERF_METRIC_OP_NAME_GET: &str = "get";
-
+pub(crate) const PERF_METRIC_OP_NAME_MULTI_GET: &str = "multi_get";
 pub(crate) const PERF_METRIC_OP_NAME_PUT: &str = "put";
 pub(crate) const PERF_METRIC_OP_NAME_WRITE_BATCH: &str = "write_batch";
 

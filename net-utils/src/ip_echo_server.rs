@@ -87,7 +87,7 @@ async fn process_connection(
         }
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("Bad request header: {}", request_header),
+            format!("Bad request header: {request_header}"),
         ));
     }
 
@@ -95,7 +95,7 @@ async fn process_connection(
         bincode::deserialize::<IpEchoServerMessage>(&data[HEADER_LENGTH..]).map_err(|err| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("Failed to deserialize IpEchoServerMessage: {:?}", err),
+                format!("Failed to deserialize IpEchoServerMessage: {err:?}"),
             )
         })?;
 
@@ -130,7 +130,7 @@ async fn process_connection(
             .await??;
 
             debug!("Connection established to tcp/{}", *tcp_port);
-            let _ = tcp_stream.shutdown();
+            tcp_stream.shutdown().await?;
         }
     }
     let response = IpEchoServerResponse {
@@ -173,7 +173,11 @@ pub fn ip_echo_server(
 ) -> IpEchoServer {
     tcp_listener.set_nonblocking(true).unwrap();
 
-    let runtime = Runtime::new().expect("Failed to create Runtime");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("solIpEchoSrvrRt")
+        .enable_all()
+        .build()
+        .expect("new tokio runtime");
     runtime.spawn(run_echo_server(tcp_listener, shred_version));
     runtime
 }

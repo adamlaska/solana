@@ -9,6 +9,7 @@ use {
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
     histogram::Histogram,
+    itertools::Itertools,
     solana_sdk::{packet::Packet, pubkey::Pubkey, timing::timestamp},
     std::{
         cmp::Reverse,
@@ -27,11 +28,11 @@ use {
 // Total stake and nodes => stake map
 #[derive(Default)]
 pub struct StakedNodes {
-    pub total_stake: u64,
-    pub max_stake: u64,
-    pub min_stake: u64,
-    pub ip_stake_map: HashMap<IpAddr, u64>,
-    pub pubkey_stake_map: HashMap<Pubkey, u64>,
+    stakes: Arc<HashMap<Pubkey, u64>>,
+    overrides: HashMap<Pubkey, u64>,
+    total_stake: u64,
+    max_stake: u64,
+    min_stake: u64,
 }
 
 pub type PacketBatchReceiver = Receiver<PacketBatch>;
@@ -102,17 +103,17 @@ pub type Result<T> = std::result::Result<T, StreamerError>;
 
 fn recv_loop(
     socket: &UdpSocket,
-    exit: Arc<AtomicBool>,
+    exit: &AtomicBool,
     packet_batch_sender: &PacketBatchSender,
     recycler: &PacketBatchRecycler,
     stats: &StreamerReceiveStats,
-    coalesce_ms: u64,
+    coalesce: Duration,
     use_pinned_memory: bool,
     in_vote_only_mode: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     loop {
         let mut packet_batch = if use_pinned_memory {
-            PacketBatch::new_with_recycler(recycler.clone(), PACKETS_PER_BATCH, stats.name)
+            PacketBatch::new_with_recycler(recycler, PACKETS_PER_BATCH, stats.name)
         } else {
             PacketBatch::with_capacity(PACKETS_PER_BATCH)
         };
@@ -130,7 +131,7 @@ fn recv_loop(
                 }
             }
 
-            if let Ok(len) = packet::recv_from(&mut packet_batch, socket, coalesce_ms) {
+            if let Ok(len) = packet::recv_from(&mut packet_batch, socket, coalesce) {
                 if len > 0 {
                     let StreamerReceiveStats {
                         packets_count,
@@ -156,27 +157,28 @@ fn recv_loop(
 }
 
 pub fn receiver(
+    thread_name: String,
     socket: Arc<UdpSocket>,
     exit: Arc<AtomicBool>,
     packet_batch_sender: PacketBatchSender,
     recycler: PacketBatchRecycler,
     stats: Arc<StreamerReceiveStats>,
-    coalesce_ms: u64,
+    coalesce: Duration,
     use_pinned_memory: bool,
     in_vote_only_mode: Option<Arc<AtomicBool>>,
 ) -> JoinHandle<()> {
     let res = socket.set_read_timeout(Some(Duration::new(1, 0)));
     assert!(res.is_ok(), "streamer::receiver set_read_timeout error");
     Builder::new()
-        .name("solana-receiver".to_string())
+        .name(thread_name)
         .spawn(move || {
             let _ = recv_loop(
                 &socket,
-                exit,
+                &exit,
                 &packet_batch_sender,
                 &recycler,
                 &stats,
-                coalesce_ms,
+                coalesce,
                 use_pinned_memory,
                 in_vote_only_mode,
             );
@@ -287,9 +289,52 @@ impl StreamerSendStats {
     }
 
     fn record(&mut self, pkt: &Packet) {
-        let ent = self.host_map.entry(pkt.meta.addr).or_default();
+        let ent = self.host_map.entry(pkt.meta().addr).or_default();
         ent.count += 1;
         ent.bytes += pkt.data(..).map(<[u8]>::len).unwrap_or_default() as u64;
+    }
+}
+
+impl StakedNodes {
+    pub fn new(stakes: Arc<HashMap<Pubkey, u64>>, overrides: HashMap<Pubkey, u64>) -> Self {
+        let values = stakes
+            .iter()
+            .filter(|(pubkey, _)| !overrides.contains_key(pubkey))
+            .map(|(_, &stake)| stake)
+            .chain(overrides.values().copied())
+            .filter(|&stake| stake > 0);
+        let total_stake = values.clone().sum();
+        let (min_stake, max_stake) = values.minmax().into_option().unwrap_or_default();
+        Self {
+            stakes,
+            overrides,
+            total_stake,
+            max_stake,
+            min_stake,
+        }
+    }
+
+    pub fn get_node_stake(&self, pubkey: &Pubkey) -> Option<u64> {
+        self.overrides
+            .get(pubkey)
+            .or_else(|| self.stakes.get(pubkey))
+            .filter(|&&stake| stake > 0)
+            .copied()
+    }
+
+    #[inline]
+    pub fn total_stake(&self) -> u64 {
+        self.total_stake
+    }
+
+    #[inline]
+    pub(super) fn min_stake(&self) -> u64 {
+        self.min_stake
+    }
+
+    #[inline]
+    pub(super) fn max_stake(&self) -> u64 {
+        self.max_stake
     }
 }
 
@@ -305,40 +350,12 @@ fn recv_send(
         packet_batch.iter().for_each(|p| stats.record(p));
     }
     let packets = packet_batch.iter().filter_map(|pkt| {
-        let addr = pkt.meta.socket_addr();
+        let addr = pkt.meta().socket_addr();
         let data = pkt.data(..)?;
-        socket_addr_space.check(&addr).then(|| (data, addr))
+        socket_addr_space.check(&addr).then_some((data, addr))
     });
     batch_send(sock, &packets.collect::<Vec<_>>())?;
     Ok(())
-}
-
-pub fn recv_vec_packet_batches(
-    recvr: &Receiver<Vec<PacketBatch>>,
-) -> Result<(Vec<PacketBatch>, usize, Duration)> {
-    let timer = Duration::new(1, 0);
-    let mut packet_batches = recvr.recv_timeout(timer)?;
-    let recv_start = Instant::now();
-    trace!("got packets");
-    let mut num_packets = packet_batches
-        .iter()
-        .map(|packets| packets.len())
-        .sum::<usize>();
-    while let Ok(packet_batch) = recvr.try_recv() {
-        trace!("got more packets");
-        num_packets += packet_batch
-            .iter()
-            .map(|packets| packets.len())
-            .sum::<usize>();
-        packet_batches.extend(packet_batch);
-    }
-    let recv_duration = recv_start.elapsed();
-    trace!(
-        "packet batches len: {}, num packets: {}",
-        packet_batches.len(),
-        num_packets
-    );
-    Ok((packet_batches, num_packets, recv_duration))
 }
 
 pub fn recv_packet_batches(
@@ -372,7 +389,7 @@ pub fn responder(
     stats_reporter_sender: Option<Sender<Box<dyn FnOnce() + Send>>>,
 ) -> JoinHandle<()> {
     Builder::new()
-        .name(format!("solana-responder-{}", name))
+        .name(format!("solRspndr{name}"))
         .spawn(move || {
             let mut errors = 0;
             let mut last_error = None;
@@ -464,12 +481,13 @@ mod test {
         let (s_reader, r_reader) = unbounded();
         let stats = Arc::new(StreamerReceiveStats::new("test"));
         let t_receiver = receiver(
+            "solRcvrTest".to_string(),
             Arc::new(read),
             exit.clone(),
             s_reader,
             Recycler::default(),
             stats.clone(),
-            1,
+            Duration::from_millis(1), // coalesce
             true,
             None,
         );
@@ -477,7 +495,7 @@ mod test {
         let t_responder = {
             let (s_responder, r_responder) = unbounded();
             let t_responder = responder(
-                "streamer_send_test",
+                "SendTest",
                 Arc::new(send),
                 r_responder,
                 SocketAddrSpace::Unspecified,
@@ -488,8 +506,8 @@ mod test {
                 let mut p = Packet::default();
                 {
                     p.buffer_mut()[0] = i as u8;
-                    p.meta.size = PACKET_DATA_SIZE;
-                    p.meta.set_socket_addr(&addr);
+                    p.meta_mut().size = PACKET_DATA_SIZE;
+                    p.meta_mut().set_socket_addr(&addr);
                 }
                 packet_batch.push(p);
             }

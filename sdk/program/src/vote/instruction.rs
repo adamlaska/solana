@@ -2,6 +2,7 @@
 
 use {
     crate::{
+        clock::{Slot, UnixTimestamp},
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         pubkey::Pubkey,
@@ -9,8 +10,9 @@ use {
         vote::{
             program::id,
             state::{
-                CompactVoteStateUpdate, Vote, VoteAuthorize, VoteAuthorizeCheckedWithSeedArgs,
-                VoteAuthorizeWithSeedArgs, VoteInit, VoteState, VoteStateUpdate,
+                serde_compact_vote_state_update, Vote, VoteAuthorize,
+                VoteAuthorizeCheckedWithSeedArgs, VoteAuthorizeWithSeedArgs, VoteInit,
+                VoteStateUpdate, VoteStateVersions,
             },
         },
     },
@@ -132,14 +134,72 @@ pub enum VoteInstruction {
     /// # Account references
     ///   0. `[Write]` Vote account to vote with
     ///   1. `[SIGNER]` Vote authority
-    CompactUpdateVoteState(CompactVoteStateUpdate),
+    #[serde(with = "serde_compact_vote_state_update")]
+    CompactUpdateVoteState(VoteStateUpdate),
 
     /// Update the onchain vote state for the signer along with a switching proof.
     ///
     /// # Account references
     ///   0. `[Write]` Vote account to vote with
     ///   1. `[SIGNER]` Vote authority
-    CompactUpdateVoteStateSwitch(CompactVoteStateUpdate, Hash),
+    CompactUpdateVoteStateSwitch(
+        #[serde(with = "serde_compact_vote_state_update")] VoteStateUpdate,
+        Hash,
+    ),
+}
+
+impl VoteInstruction {
+    pub fn is_simple_vote(&self) -> bool {
+        matches!(
+            self,
+            Self::Vote(_)
+                | Self::VoteSwitch(_, _)
+                | Self::UpdateVoteState(_)
+                | Self::UpdateVoteStateSwitch(_, _)
+                | Self::CompactUpdateVoteState(_)
+                | Self::CompactUpdateVoteStateSwitch(_, _),
+        )
+    }
+
+    pub fn is_single_vote_state_update(&self) -> bool {
+        matches!(
+            self,
+            Self::UpdateVoteState(_)
+                | Self::UpdateVoteStateSwitch(_, _)
+                | Self::CompactUpdateVoteState(_)
+                | Self::CompactUpdateVoteStateSwitch(_, _),
+        )
+    }
+
+    /// Only to be used on vote instructions (guard with is_simple_vote),  panics otherwise
+    pub fn last_voted_slot(&self) -> Option<Slot> {
+        assert!(self.is_simple_vote());
+        match self {
+            Self::Vote(v) | Self::VoteSwitch(v, _) => v.last_voted_slot(),
+            Self::UpdateVoteState(vote_state_update)
+            | Self::UpdateVoteStateSwitch(vote_state_update, _)
+            | Self::CompactUpdateVoteState(vote_state_update)
+            | Self::CompactUpdateVoteStateSwitch(vote_state_update, _) => {
+                vote_state_update.last_voted_slot()
+            }
+            _ => panic!("Tried to get slot on non simple vote instruction"),
+        }
+    }
+
+    /// Only to be used on vote instructions (guard with is_simple_vote),  panics otherwise
+    pub fn timestamp(&self) -> Option<UnixTimestamp> {
+        assert!(self.is_simple_vote());
+        match self {
+            Self::Vote(v) | Self::VoteSwitch(v, _) => v.timestamp,
+            Self::UpdateVoteState(vote_state_update)
+            | Self::UpdateVoteStateSwitch(vote_state_update, _)
+            | Self::CompactUpdateVoteState(vote_state_update)
+            | Self::CompactUpdateVoteStateSwitch(vote_state_update, _) => {
+                vote_state_update.timestamp
+            }
+            _ => panic!("Tried to get timestamp on non simple vote instruction"),
+        }
+    }
 }
 
 fn initialize_account(vote_pubkey: &Pubkey, vote_init: &VoteInit) -> Instruction {
@@ -157,19 +217,43 @@ fn initialize_account(vote_pubkey: &Pubkey, vote_init: &VoteInit) -> Instruction
     )
 }
 
+pub struct CreateVoteAccountConfig<'a> {
+    pub space: u64,
+    pub with_seed: Option<(&'a Pubkey, &'a str)>,
+}
+
+impl<'a> Default for CreateVoteAccountConfig<'a> {
+    fn default() -> Self {
+        Self {
+            space: VoteStateVersions::vote_state_size_of(false) as u64,
+            with_seed: None,
+        }
+    }
+}
+
+#[deprecated(
+    since = "1.16.0",
+    note = "Please use `create_account_with_config()` instead."
+)]
 pub fn create_account(
     from_pubkey: &Pubkey,
     vote_pubkey: &Pubkey,
     vote_init: &VoteInit,
     lamports: u64,
 ) -> Vec<Instruction> {
-    let space = VoteState::size_of() as u64;
-    let create_ix =
-        system_instruction::create_account(from_pubkey, vote_pubkey, lamports, space, &id());
-    let init_ix = initialize_account(vote_pubkey, vote_init);
-    vec![create_ix, init_ix]
+    create_account_with_config(
+        from_pubkey,
+        vote_pubkey,
+        vote_init,
+        lamports,
+        CreateVoteAccountConfig::default(),
+    )
 }
 
+#[deprecated(
+    since = "1.16.0",
+    note = "Please use `create_account_with_config()` instead."
+)]
 pub fn create_account_with_seed(
     from_pubkey: &Pubkey,
     vote_pubkey: &Pubkey,
@@ -178,16 +262,27 @@ pub fn create_account_with_seed(
     vote_init: &VoteInit,
     lamports: u64,
 ) -> Vec<Instruction> {
-    let space = VoteState::size_of() as u64;
-    let create_ix = system_instruction::create_account_with_seed(
+    create_account_with_config(
         from_pubkey,
         vote_pubkey,
-        base,
-        seed,
+        vote_init,
         lamports,
-        space,
-        &id(),
-    );
+        CreateVoteAccountConfig {
+            with_seed: Some((base, seed)),
+            ..CreateVoteAccountConfig::default()
+        },
+    )
+}
+
+pub fn create_account_with_config(
+    from_pubkey: &Pubkey,
+    vote_pubkey: &Pubkey,
+    vote_init: &VoteInit,
+    lamports: u64,
+    config: CreateVoteAccountConfig,
+) -> Vec<Instruction> {
+    let create_ix =
+        system_instruction::create_account(from_pubkey, vote_pubkey, lamports, config.space, &id());
     let init_ix = initialize_account(vote_pubkey, vote_init);
     vec![create_ix, init_ix]
 }
@@ -387,7 +482,7 @@ pub fn update_vote_state_switch(
 pub fn compact_update_vote_state(
     vote_pubkey: &Pubkey,
     authorized_voter_pubkey: &Pubkey,
-    compact_vote_state_update: CompactVoteStateUpdate,
+    vote_state_update: VoteStateUpdate,
 ) -> Instruction {
     let account_metas = vec![
         AccountMeta::new(*vote_pubkey, false),
@@ -396,7 +491,7 @@ pub fn compact_update_vote_state(
 
     Instruction::new_with_bincode(
         id(),
-        &VoteInstruction::CompactUpdateVoteState(compact_vote_state_update),
+        &VoteInstruction::CompactUpdateVoteState(vote_state_update),
         account_metas,
     )
 }
@@ -404,7 +499,7 @@ pub fn compact_update_vote_state(
 pub fn compact_update_vote_state_switch(
     vote_pubkey: &Pubkey,
     authorized_voter_pubkey: &Pubkey,
-    vote_state_update: CompactVoteStateUpdate,
+    vote_state_update: VoteStateUpdate,
     proof_hash: Hash,
 ) -> Instruction {
     let account_metas = vec![

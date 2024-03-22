@@ -7,16 +7,16 @@
 //!
 //! [`legacy`]: crate::message::legacy
 //! [`v0`]: crate::message::v0
-//! [future message format]: https://docs.solana.com/proposals/transactions-v2
+//! [future message format]: https://docs.solanalabs.com/proposals/versioned-transactions
 
-#![allow(clippy::integer_arithmetic)]
+#![allow(clippy::arithmetic_side_effects)]
 
 use {
     crate::{
         bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
         hash::Hash,
         instruction::{CompiledInstruction, Instruction},
-        message::{CompiledKeys, MessageHeader},
+        message::{compiled_keys::CompiledKeys, MessageHeader},
         pubkey::Pubkey,
         sanitize::{Sanitize, SanitizeError},
         short_vec, system_instruction, system_program, sysvar, wasm_bindgen,
@@ -26,7 +26,7 @@ use {
 };
 
 lazy_static! {
-    // Copied keys over since direct references create cyclical dependency.
+    // This will be deprecated and so this list shouldn't be modified
     pub static ref BUILTIN_PROGRAMS_KEYS: [Pubkey; 10] = {
         let parse = |s| Pubkey::from_str(s).unwrap();
         [
@@ -169,18 +169,18 @@ impl Message {
     ///
     /// # Examples
     ///
-    /// This example uses the [`solana_sdk`], [`solana_client`] and [`anyhow`] crates.
+    /// This example uses the [`solana_sdk`], [`solana_rpc_client`] and [`anyhow`] crates.
     ///
     /// [`solana_sdk`]: https://docs.rs/solana-sdk
-    /// [`solana_client`]: https://docs.rs/solana-client
+    /// [`solana_rpc_client`]: https://docs.rs/solana-rpc-client
     /// [`anyhow`]: https://docs.rs/anyhow
     ///
     /// ```
     /// # use solana_program::example_mocks::solana_sdk;
-    /// # use solana_program::example_mocks::solana_client;
+    /// # use solana_program::example_mocks::solana_rpc_client;
     /// use anyhow::Result;
     /// use borsh::{BorshSerialize, BorshDeserialize};
-    /// use solana_client::rpc_client::RpcClient;
+    /// use solana_rpc_client::rpc_client::RpcClient;
     /// use solana_sdk::{
     ///     instruction::Instruction,
     ///     message::Message,
@@ -193,6 +193,7 @@ impl Message {
     /// // another crate so it can be shared between the on-chain program and
     /// // the client.
     /// #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// enum BankInstruction {
     ///     Initialize,
     ///     Deposit { lamports: u64 },
@@ -240,18 +241,18 @@ impl Message {
     ///
     /// # Examples
     ///
-    /// This example uses the [`solana_sdk`], [`solana_client`] and [`anyhow`] crates.
+    /// This example uses the [`solana_sdk`], [`solana_rpc_client`] and [`anyhow`] crates.
     ///
     /// [`solana_sdk`]: https://docs.rs/solana-sdk
-    /// [`solana_client`]: https://docs.rs/solana-client
+    /// [`solana_rpc_client`]: https://docs.rs/solana-rpc-client
     /// [`anyhow`]: https://docs.rs/anyhow
     ///
     /// ```
     /// # use solana_program::example_mocks::solana_sdk;
-    /// # use solana_program::example_mocks::solana_client;
+    /// # use solana_program::example_mocks::solana_rpc_client;
     /// use anyhow::Result;
     /// use borsh::{BorshSerialize, BorshDeserialize};
-    /// use solana_client::rpc_client::RpcClient;
+    /// use solana_rpc_client::rpc_client::RpcClient;
     /// use solana_sdk::{
     ///     instruction::Instruction,
     ///     message::Message,
@@ -264,6 +265,7 @@ impl Message {
     /// // another crate so it can be shared between the on-chain program and
     /// // the client.
     /// #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// enum BankInstruction {
     ///     Initialize,
     ///     Deposit { lamports: u64 },
@@ -328,7 +330,7 @@ impl Message {
 
     /// Create a new message for a [nonced transaction].
     ///
-    /// [nonced transaction]: https://docs.solana.com/implemented-proposals/durable-tx-nonces
+    /// [nonced transaction]: https://docs.solanalabs.com/implemented-proposals/durable-tx-nonces
     ///
     /// In this type of transaction, the blockhash is replaced with a _durable
     /// transaction nonce_, allowing for extended time to pass between the
@@ -336,18 +338,18 @@ impl Message {
     ///
     /// # Examples
     ///
-    /// This example uses the [`solana_sdk`], [`solana_client`] and [`anyhow`] crates.
+    /// This example uses the [`solana_sdk`], [`solana_rpc_client`] and [`anyhow`] crates.
     ///
     /// [`solana_sdk`]: https://docs.rs/solana-sdk
-    /// [`solana_client`]: https://docs.rs/solana-client
+    /// [`solana_rpc_client`]: https://docs.rs/solana-client
     /// [`anyhow`]: https://docs.rs/anyhow
     ///
     /// ```
     /// # use solana_program::example_mocks::solana_sdk;
-    /// # use solana_program::example_mocks::solana_client;
+    /// # use solana_program::example_mocks::solana_rpc_client;
     /// use anyhow::Result;
     /// use borsh::{BorshSerialize, BorshDeserialize};
-    /// use solana_client::rpc_client::RpcClient;
+    /// use solana_rpc_client::rpc_client::RpcClient;
     /// use solana_sdk::{
     ///     hash::Hash,
     ///     instruction::Instruction,
@@ -363,6 +365,7 @@ impl Message {
     /// // another crate so it can be shared between the on-chain program and
     /// // the client.
     /// #[derive(BorshSerialize, BorshDeserialize)]
+    /// # #[borsh(crate = "borsh")]
     /// enum BankInstruction {
     ///     Initialize,
     ///     Deposit { lamports: u64 },
@@ -478,7 +481,7 @@ impl Message {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"solana-tx-message-v1");
         hasher.update(message_bytes);
-        Hash(<[u8; crate::hash::HASH_BYTES]>::try_from(hasher.finalize().as_slice()).unwrap())
+        Hash(hasher.finalize().into())
     }
 
     pub fn compile_instruction(&self, ix: &Instruction) -> CompiledInstruction {
@@ -545,12 +548,32 @@ impl Message {
         self.is_key_called_as_program(i) && !self.is_upgradeable_loader_present()
     }
 
-    pub fn is_writable(&self, i: usize) -> bool {
-        (i < (self.header.num_required_signatures - self.header.num_readonly_signed_accounts)
+    /// Returns true if the account at the specified index was requested to be
+    /// writable. This method should not be used directly.
+    fn is_writable_index(&self, i: usize) -> bool {
+        i < (self.header.num_required_signatures - self.header.num_readonly_signed_accounts)
             as usize
             || (i >= self.header.num_required_signatures as usize
                 && i < self.account_keys.len()
-                    - self.header.num_readonly_unsigned_accounts as usize))
+                    - self.header.num_readonly_unsigned_accounts as usize)
+    }
+
+    /// Returns true if the account at the specified index should be write
+    /// locked when loaded for transaction processing in the runtime. This
+    /// method differs from `is_maybe_writable` because it is aware of the
+    /// latest reserved accounts which are not allowed to be write locked.
+    pub fn is_writable(&self, i: usize) -> bool {
+        (self.is_writable_index(i))
+            && !is_builtin_key_or_sysvar(&self.account_keys[i])
+            && !self.demote_program_id(i)
+    }
+
+    /// Returns true if the account at the specified index is writable by the
+    /// instructions in this message. Since the dynamic set of reserved accounts
+    /// isn't used here to demote write locks, this shouldn't be used in the
+    /// runtime.
+    pub fn is_maybe_writable(&self, i: usize) -> bool {
+        (self.is_writable_index(i))
             && !is_builtin_key_or_sysvar(&self.account_keys[i])
             && !self.demote_program_id(i)
     }
@@ -597,7 +620,7 @@ impl Message {
         // `bench_has_duplicates` in benches/message_processor.rs shows that this implementation is
         // ~50 times faster than using HashSet for very short slices.
         for i in 1..self.account_keys.len() {
-            #[allow(clippy::integer_arithmetic)]
+            #[allow(clippy::arithmetic_side_effects)]
             if self.account_keys[i..].contains(&self.account_keys[i - 1]) {
                 return true;
             }
@@ -627,7 +650,7 @@ mod tests {
         let keys: HashSet<Pubkey> = BUILTIN_PROGRAMS_KEYS.iter().copied().collect();
         assert_eq!(keys.len(), 10);
         for k in keys {
-            let k = format!("{}", k);
+            let k = format!("{k}");
             assert!(k.ends_with("11111111111111111111111"));
         }
     }
