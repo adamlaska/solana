@@ -76,7 +76,7 @@
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
-    "@babel/core": "^7.12.13",
+    "@babel/core": "^7.26.10",
     "@babel/plugin-proposal-class-properties": "^7.12.1",
     "@babel/plugin-transform-runtime": "^7.12.10",
     "@babel/preset-env": "^7.12.11",
@@ -131,7 +131,7 @@
     "semantic-release": "^19.0.3",
     "sinon": "^13.0.2",
     "sinon-chai": "^3.7.0",
-    "start-server-and-test": "^1.12.0",
+    "start-server-and-test": "^2.0.11",
     "ts-mocha": "^10.0.0",
     "ts-node": "^10.0.0",
     "tslib": "^2.1.0",
